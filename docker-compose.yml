@@ -1,0 +1,19 @@
+services:
+  siwan-notes:
+    build: .
+    container_name: siwan_notes
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PUID=0
+      - PGID=0
+      - SIWAN_AUTH_TYPE=none
+      - SIWAN_PATH=/data
+      - SIWAN_USERNAME=admin
+      - SIWAN_PASSWORD=admin123
+    volumes:
+      - ./data:/data
+      - /www:/www
+      - /home:/home
+      - /root:/root

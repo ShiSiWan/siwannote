@@ -1,0 +1,81 @@
+@import "katex/dist/katex.min.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    @font-face {
+        font-family: "Poppins";
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url("assets/fonts/Poppins/Poppins-Regular.ttf");
+    }
+
+    @font-face {
+        font-family: "Poppins";
+        font-style: italic;
+        font-weight: 400;
+        font-display: swap;
+        src: url("assets/fonts/Poppins/Poppins-Italic.ttf");
+    }
+
+    @font-face {
+        font-family: "Poppins";
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url("assets/fonts/Poppins/Poppins-SemiBold.ttf");
+    }
+
+    @font-face {
+        font-family: "Poppins";
+        font-style: italic;
+        font-weight: 600;
+        font-display: swap;
+        src: url("assets/fonts/Poppins/Poppins-SemiBoldItalic.ttf");
+    }
+
+    :root, body {
+        --theme-brand: 248 166 107;
+        --theme-background: 255 255 255;
+        --theme-background-elevated: 243 244 245;
+        --theme-text: 44 49 57;
+        --theme-text-muted: 136 145 161;
+        --theme-text-very-muted: 193 199 208;
+        --theme-shadow: 236 238 240;
+        --theme-border: 230 232 235;
+    }
+
+    /* 沉浸深色模式 (Dark Mode) */
+    html.dark, html.dark body, body.dark {
+        --theme-brand: 248 166 107;
+        --theme-background: 24 27 32;
+        --theme-background-elevated: 34 39 46;
+        --theme-text: 218 224 233;
+        --theme-text-muted: 145 155 172;
+        --theme-text-very-muted: 95 106 125;
+        --theme-shadow: 16 18 22;
+        --theme-border: 55 62 74;
+        color-scheme: dark;
+    }
+
+    /* 柔和护眼模式 (Eye Care / Warm Paper Mode) */
+    html.eye-care, html.eye-care body, body.eye-care {
+        --theme-brand: 215 110 50;
+        --theme-background: 247 244 237;
+        --theme-background-elevated: 237 232 220;
+        --theme-text: 48 42 36;
+        --theme-text-muted: 120 110 98;
+        --theme-text-very-muted: 175 165 150;
+        --theme-shadow: 225 218 205;
+        --theme-border: 226 218 204;
+        color-scheme: light;
+    }
+
+    body {
+        background-color: rgb(var(--theme-background));
+        color: rgb(var(--theme-text));
+        transition: background-color 0.2s ease, color 0.2s ease;
+    }
+}

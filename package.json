@@ -1,0 +1,39 @@
+{
+  "name": "siwannote",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SiWan_notes - A lightweight research markdown notebook & SLAM knowledge lab.",
+  "main": "client/index.html",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "vite build",
+    "watch": "vite build --watch",
+    "dev": "vite"
+  },
+  "author": "SiWan & Contributors",
+  "license": "MIT",
+  "dependencies": {
+    "@jamescoyle/vue-icon": "0.1.2",
+    "@mdi/js": "7.4.47",
+    "@mdi/light-js": "0.2.63",
+    "@toast-ui/editor": "3.2.2",
+    "@toast-ui/editor-plugin-code-syntax-highlight": "3.1.0",
+    "axios": "1.19.0",
+    "katex": "^0.18.7",
+    "mousetrap": "1.6.5",
+    "pinia": "4.0.2",
+    "primevue": "3.53.1",
+    "vue": "3.5.40",
+    "vue-router": "5.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.8",
+    "autoprefixer": "10.5.4",
+    "postcss": "8.5.25",
+    "prettier": "3.9.6",
+    "prettier-plugin-tailwindcss": "0.8.1",
+    "sass-embedded": "1.100.0",
+    "tailwindcss": "3.4.19",
+    "vite": "8.2.0"
+  }
+}

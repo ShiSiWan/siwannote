@@ -1,0 +1,68 @@
+<template>
+  <div class="flex items-center gap-2.5 sm:gap-3.5 select-none cursor-pointer group">
+    <!-- User Specified Keyline Emblem SVG (Enlarged, no border) -->
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 36 36"
+      fill="none"
+      stroke="#FF8C00"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class="h-9 w-9 sm:h-11 sm:w-11 md:h-12 md:w-12 shrink-0 transition-transform duration-300 group-hover:scale-105"
+    >
+      <g transform="scale(1.5)">
+        <path d="M21.3891 8.1109C22.4205 9.1424 23 10.5413 23 12C23 13.4587 22.4205 14.8576 21.3891 15.8891C21.3891 18.9267 18.9267 21.3891 15.8891 21.3891C14.8576 22.4205 13.4587 23 12 23C10.5413 23 9.1424 22.4205 8.1109 21.3891C5.0733 21.3891 2.6109 18.9267 2.6109 15.8891C1.5795 14.8576 1 13.4587 1 12C1 10.5413 1.5795 9.1424 2.6109 8.1109C2.6109 5.0733 5.0733 2.6109 8.1109 2.6109C9.1424 1.5795 10.5413 1 12 1C13.4587 1 14.8576 1.5795 15.8891 2.6109C18.9267 2.6109 21.3891 5.0733 21.3891 8.1109Z" fill="#FF8C00" fill-opacity="0.4" stroke="none"/>
+        <path d="M14.5 7L10.5 7C9.1193 7 8 8.1193 8 9.5C8 10.8807 9.1193 12 10.5 12L13.5 12C14.8807 12 16 13.1193 16 14.5C16 15.8807 14.8807 17 13.5 17L9.5 17" fill="none"/>
+      </g>
+    </svg>
+
+    <!-- Dynamic Customizable Brand Typography -->
+    <div class="flex flex-col">
+      <div class="flex items-baseline gap-1">
+        <span class="text-xl sm:text-2xl md:text-3xl font-black tracking-tight text-theme-text font-mono transition-colors">
+          {{ displayTitleMain }}
+        </span>
+        <span v-if="displayTitleSub" class="text-base sm:text-lg md:text-xl font-extrabold text-theme-brand tracking-tight">
+          {{ displayTitleSub }}
+        </span>
+      </div>
+      <div v-if="globalStore.siteSubtitle" class="flex items-center gap-1.5 mt-0.5">
+        <span class="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span class="text-[10px] sm:text-[11px] tracking-widest text-theme-text-muted uppercase font-bold opacity-80 font-sans truncate max-w-[220px] sm:max-w-none">
+          {{ globalStore.siteSubtitle }}
+        </span>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { computed } from "vue";
+import { useGlobalStore } from "../globalStore.js";
+
+const props = defineProps({
+  responsive: {
+    type: Boolean,
+    default: false,
+  },
+});
+
+const globalStore = useGlobalStore();
+
+const displayTitleMain = computed(() => {
+  const full = globalStore.siteTitle || "siwannote";
+  if (full.includes("_")) {
+    return full.split("_")[0];
+  }
+  return full;
+});
+
+const displayTitleSub = computed(() => {
+  const full = globalStore.siteTitle || "siwannote";
+  if (full.includes("_")) {
+    return "_" + full.split("_").slice(1).join("_");
+  }
+  return "";
+});
+</script>

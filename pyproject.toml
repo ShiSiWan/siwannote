@@ -1,0 +1,30 @@
+[project]
+name = "siwannote"
+version = "1.0.0"
+description = "SiWan_notes - A lightweight research markdown notebook & SLAM knowledge lab."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "whoosh==2.7.4",
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.1",
+    "aiofiles==25.1.0",
+    "python-jose[cryptography]==3.5.0",
+    "pyotp==2.10.0",
+    "qrcode==8.2",
+    "python-multipart==0.0.32",
+    "httpx>=0.25.0",
+]
+
+[dependency-groups]
+dev = [
+    "black",
+    "flake8",
+    "rope",
+    "isort",
+]
+
+[tool.isort]
+profile = "black"
+line_length = 79
+src_paths = ["server"]

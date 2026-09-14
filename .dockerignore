@@ -1,0 +1,18 @@
+# Ignore everything
+**
+
+# Include the following
+!.htmlnanorc
+!.python-version
+!client/**
+!entrypoint.sh
+!healthcheck.sh
+!LICENSE
+!package-lock.json
+!package.json
+!postcss.config.js
+!pyproject.toml
+!server/**
+!tailwind.config.js
+!uv.lock
+!vite.config.js
