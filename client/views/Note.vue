@@ -444,11 +444,7 @@ function deleteNoteConfirmed() {
 
 // Note Saving
 function saveHandler(close = false) {
-  if (!isNewNote.value && newTitle.value != note.value.title) {
-    isRenameModalVisible.value = true;
-  } else {
-    saveConfirmed(close);
-  }
+  saveConfirmed(close);
 }
 
 function saveConfirmed(close = false) {
