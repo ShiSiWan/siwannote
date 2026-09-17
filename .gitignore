@@ -248,6 +248,7 @@ dist
 .vscode/
 data/
 /notes/
+docs/
 *.log
 .siwan_server_config.json
 .siwan_ai_config.json
