@@ -24,6 +24,9 @@ class Note(CustomBaseModel):
     title: str
     content: Optional[str] = Field(None)
     last_modified: float
+    created: Optional[str] = Field(None)
+    updated: Optional[str] = Field(None)
+    reviewed: Optional[str] = Field(None)
 
 
 class NoteUpdate(CustomBaseModel):
@@ -38,6 +41,9 @@ class NoteUpdate(CustomBaseModel):
 class SearchResult(CustomBaseModel):
     title: str
     last_modified: float
+    created: Optional[str] = Field(None)
+    updated: Optional[str] = Field(None)
+    reviewed: Optional[str] = Field(None)
 
     score: Optional[float] = Field(None)
     title_highlights: Optional[str] = Field(None)

@@ -18,6 +18,8 @@ from whoosh.query import Every
 from whoosh.searching import Hit
 from whoosh.support.charset import accent_map
 
+import yaml
+
 from helpers import get_env, is_valid_filename
 from logger import logger
 
@@ -26,6 +28,69 @@ from ..models import Note, NoteCreate, NoteUpdate, SearchResult
 
 MARKDOWN_EXT = ".md"
 INDEX_SCHEMA_VERSION = "5"
+
+FRONT_MATTER_RE = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?", re.DOTALL)
+
+
+def now_iso8601() -> str:
+    """Return current timestamp in ISO 8601 format with timezone offset."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def parse_note_file(raw_content: str, filepath: str = "", fallback_title: str = "") -> Tuple[dict, str]:
+    """Parse front matter and markdown body from file content.
+    Returns (metadata_dict, body_content)."""
+    meta = {}
+    body = raw_content
+    match = FRONT_MATTER_RE.match(raw_content)
+    if match:
+        yaml_text = match.group(1)
+        try:
+            parsed = yaml.safe_load(yaml_text)
+            if isinstance(parsed, dict):
+                meta = parsed
+        except Exception as e:
+            logger.warning(f"Failed to parse YAML front matter in {filepath}: {e}")
+        body = raw_content[match.end():]
+
+    title = meta.get("title") or fallback_title
+    meta["title"] = str(title) if title else ""
+
+    def to_iso(val, fallback_ts):
+        if val is None or val == "":
+            try:
+                return datetime.fromtimestamp(fallback_ts).astimezone().isoformat(timespec="seconds")
+            except Exception:
+                return now_iso8601()
+        if isinstance(val, datetime):
+            return val.astimezone().isoformat(timespec="seconds")
+        return str(val)
+
+    mtime = os.path.getmtime(filepath) if (filepath and os.path.exists(filepath)) else time.time()
+    ctime = os.path.getctime(filepath) if (filepath and os.path.exists(filepath)) else mtime
+
+    meta["created"] = to_iso(meta.get("created"), ctime)
+    meta["updated"] = to_iso(meta.get("updated"), mtime)
+    if meta.get("reviewed"):
+        meta["reviewed"] = to_iso(meta.get("reviewed"), mtime)
+    else:
+        meta["reviewed"] = None
+
+    return meta, body
+
+
+def serialize_note_file(meta: dict, body: str) -> str:
+    """Serialize metadata dict into YAML front matter and combine with body."""
+    lines = ["---"]
+    for key in ("title", "created", "updated", "reviewed"):
+        val = meta.get(key)
+        if val is not None and val != "":
+            lines.append(f"{key}: {val}")
+    for k, v in meta.items():
+        if k not in ("title", "created", "updated", "reviewed") and v is not None:
+            lines.append(f"{k}: {v}")
+    lines.extend(["---", ""])
+    return "\n".join(lines) + body.lstrip("\r\n")
 
 StemmingFoldingAnalyzer = StemmingAnalyzer() | CharsetFilter(accent_map)
 
@@ -58,28 +123,62 @@ class FileSystemNotes(BaseNotes):
                 self.storage_path = get_env("SIWAN_PATH", fallback_keys=["FLATNOTES_PATH"], mandatory=True)
         if not os.path.exists(self.storage_path):
             os.makedirs(self.storage_path, exist_ok=True)
+        self._ensure_notes_front_matter()
         self.index = self._load_index()
         self._sync_index_with_retry(optimize=True)
+
+    def _ensure_notes_front_matter(self) -> None:
+        """Ensure all markdown files have valid YAML front matter."""
+        for filename in self._list_all_note_filenames():
+            filepath = os.path.join(self.storage_path, filename)
+            if not os.path.isfile(filepath):
+                continue
+            try:
+                raw = self._read_file(filepath)
+                if not FRONT_MATTER_RE.match(raw):
+                    title = self._strip_ext(filename)
+                    meta, body = parse_note_file(raw, filepath, title)
+                    new_content = serialize_note_file(meta, body)
+                    self._write_file(filepath, new_content, overwrite=True)
+            except Exception as e:
+                logger.warning(f"Error ensuring front matter for {filename}: {e}")
 
     def create(self, data: NoteCreate) -> Note:
         """Create a new note."""
         filepath = self._path_from_title(data.title)
-        self._write_file(filepath, data.content)
+        now_iso = now_iso8601()
+        inc_meta, body = parse_note_file(data.content or "", filepath, data.title)
+        meta = {
+            "title": data.title,
+            "created": inc_meta.get("created") or now_iso,
+            "updated": now_iso,
+        }
+        if inc_meta.get("reviewed"):
+            meta["reviewed"] = inc_meta["reviewed"]
+        full_content = serialize_note_file(meta, body)
+        self._write_file(filepath, full_content)
         return Note(
             title=data.title,
-            content=data.content,
+            content=body,
             last_modified=os.path.getmtime(filepath),
+            created=meta.get("created"),
+            updated=meta.get("updated"),
+            reviewed=meta.get("reviewed"),
         )
 
     def get(self, title: str) -> Note:
         """Get a specific note."""
         is_valid_filename(title)
         filepath = self._path_from_title(title)
-        content = self._read_file(filepath)
+        raw_content = self._read_file(filepath)
+        meta, body = parse_note_file(raw_content, filepath, title)
         return Note(
             title=title,
-            content=content,
+            content=body,
             last_modified=os.path.getmtime(filepath),
+            created=meta.get("created"),
+            updated=meta.get("updated"),
+            reviewed=meta.get("reviewed"),
         )
 
     def update(self, title: str, data: NoteUpdate) -> Note:
@@ -95,16 +194,56 @@ class FileSystemNotes(BaseNotes):
             os.rename(filepath, new_filepath)
             title = data.new_title
             filepath = new_filepath
+
+        existing_meta = {}
+        if os.path.exists(filepath):
+            try:
+                existing_raw = self._read_file(filepath)
+                existing_meta, _ = parse_note_file(existing_raw, filepath, title)
+            except Exception:
+                pass
+
         if data.new_content is not None:
-            self._write_file(filepath, data.new_content, overwrite=True)
-            content = data.new_content
+            inc_meta, body = parse_note_file(data.new_content, filepath, title)
+            now_iso = now_iso8601()
+            merged_meta = {
+                "title": title,
+                "created": existing_meta.get("created") or inc_meta.get("created") or now_iso,
+                "updated": now_iso,
+            }
+            if existing_meta.get("reviewed"):
+                merged_meta["reviewed"] = existing_meta["reviewed"]
+            elif inc_meta.get("reviewed"):
+                merged_meta["reviewed"] = inc_meta["reviewed"]
+
+            full_content = serialize_note_file(merged_meta, body)
+            self._write_file(filepath, full_content, overwrite=True)
+            content = body
+            meta = merged_meta
         else:
-            content = self._read_file(filepath)
+            raw = self._read_file(filepath)
+            meta, content = parse_note_file(raw, filepath, title)
+
         return Note(
             title=title,
             content=content,
             last_modified=os.path.getmtime(filepath),
+            created=meta.get("created"),
+            updated=meta.get("updated"),
+            reviewed=meta.get("reviewed"),
         )
+
+    def update_reviewed(self, title: str, reviewed_iso: str) -> None:
+        """Update the reviewed timestamp in the note front matter."""
+        is_valid_filename(title)
+        filepath = self._path_from_title(title)
+        if not os.path.exists(filepath):
+            return
+        raw = self._read_file(filepath)
+        meta, body = parse_note_file(raw, filepath, title)
+        meta["reviewed"] = reviewed_iso
+        full_content = serialize_note_file(meta, body)
+        self._write_file(filepath, full_content, overwrite=True)
 
     def delete(self, title: str) -> None:
         """Delete a specific note."""
@@ -370,9 +509,21 @@ class FileSystemNotes(BaseNotes):
             else None
         )
 
+        meta = {}
+        try:
+            filepath = self._path_from_title(title)
+            if os.path.exists(filepath):
+                raw_c = self._read_file(filepath)
+                meta, _ = parse_note_file(raw_c, filepath, title)
+        except Exception:
+            pass
+
         return SearchResult(
             title=title,
             last_modified=last_modified,
+            created=meta.get("created"),
+            updated=meta.get("updated"),
+            reviewed=meta.get("reviewed"),
             score=score,
             title_highlights=title_highlights,
             content_highlights=content_highlights,

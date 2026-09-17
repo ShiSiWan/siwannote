@@ -72,9 +72,11 @@ function init() {
     globalStore.config.quickAccessLimit + 1,
   )
     .then((data) => {
-      notes.value = data.sort((a, b) =>
-        a.title.localeCompare(b.title, "zh-Hans-CN", { numeric: true, sensitivity: "base" })
-      );
+      notes.value = data.sort((a, b) => {
+        const timeA = new Date(a.updated || a.last_modified * 1000).getTime();
+        const timeB = new Date(b.updated || b.last_modified * 1000).getTime();
+        return timeB - timeA;
+      });
       loadingIndicator.value.setLoaded();
     })
     .catch((error) => {

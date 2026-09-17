@@ -47,3 +47,35 @@ export function loadTheme() {
     applyTheme("light", false);
   }
 }
+
+export function formatRelativeTime(isoOrTimestamp) {
+  if (!isoOrTimestamp) return "";
+  const date = typeof isoOrTimestamp === "number"
+    ? new Date(isoOrTimestamp * 1000)
+    : new Date(isoOrTimestamp);
+  if (isNaN(date.getTime())) return String(isoOrTimestamp);
+
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  if (diffMs < 0) return "刚刚";
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 45) return "刚刚";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} 分钟前`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour} 小时前`;
+  const diffDay = Math.floor(diffHour / 24);
+  if (diffDay < 30) return `${diffDay} 天前`;
+  const diffMonth = Math.floor(diffDay / 30);
+  if (diffMonth < 12) return `${diffMonth} 个月前`;
+  return `${Math.floor(diffDay / 365)} 年前`;
+}
+
+export function formatAbsoluteTime(isoOrTimestamp) {
+  if (!isoOrTimestamp) return "";
+  const date = typeof isoOrTimestamp === "number"
+    ? new Date(isoOrTimestamp * 1000)
+    : new Date(isoOrTimestamp);
+  if (isNaN(date.getTime())) return String(isoOrTimestamp);
+  return date.toLocaleString("zh-CN", { hour12: false });
+}

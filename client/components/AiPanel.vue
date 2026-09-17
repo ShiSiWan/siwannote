@@ -89,19 +89,30 @@
 
           <!-- Summary Content Display: Pure Preview Mode with Only Copy Button -->
           <div v-else-if="summaryText" class="space-y-3">
-            <!-- Header Bar: Model tag + ONLY Copy Button -->
+            <!-- Header Bar: Model tag + Action Buttons -->
             <div class="flex items-center justify-between border-b border-theme-border pb-2 text-[11px] text-theme-text-muted">
               <span class="rounded bg-indigo-500/10 px-1.5 py-0.5 font-mono text-[10px] text-indigo-400">
                 {{ summaryModel || 'AI Model' }}
               </span>
-              <button
-                class="flex items-center gap-1 rounded border border-theme-border bg-theme-background-elevated px-2.5 py-1 text-xs font-semibold text-theme-text hover:border-indigo-500 hover:text-indigo-500 transition cursor-pointer"
-                title="复制总结内容"
-                @click="copySummary"
-              >
-                <KeylineIcon name="copy" size="12" />
-                <span>复制</span>
-              </button>
+              <div class="flex items-center gap-1.5">
+                <button
+                  class="flex items-center gap-1 rounded border border-theme-border bg-theme-background-elevated px-2 py-1 text-xs font-semibold text-theme-text hover:border-indigo-500 hover:text-indigo-500 transition cursor-pointer"
+                  title="重新进行 AI 审阅与总结"
+                  :disabled="isLoadingSummary"
+                  @click="triggerSummarize"
+                >
+                  <KeylineIcon name="sparkles" size="11" />
+                  <span>重新总结</span>
+                </button>
+                <button
+                  class="flex items-center gap-1 rounded border border-theme-border bg-theme-background-elevated px-2.5 py-1 text-xs font-semibold text-theme-text hover:border-indigo-500 hover:text-indigo-500 transition cursor-pointer"
+                  title="复制总结内容"
+                  @click="copySummary"
+                >
+                  <KeylineIcon name="copy" size="12" />
+                  <span>复制</span>
+                </button>
+              </div>
             </div>
 
             <!-- Error Notice Card -->
@@ -231,14 +242,14 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { useToast } from "primevue/usetoast";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import KeylineIcon from "./KeylineIcon.vue";
 import ToastViewer from "./toastui/ToastViewer.vue";
 import { useGlobalStore } from "../globalStore.js";
-import { getAiConfig, summarizeDocument, chatWithAi } from "../api.js";
+import { getAiConfig, summarizeDocument, chatWithAi, triggerAiScan, getDocumentSummary } from "../api.js";
 
 const props = defineProps({
   currentDocTitle: {
@@ -281,13 +292,35 @@ onMounted(() => {
     globalStore.isAiPanelOpen = false;
   }
 
-  // Listen to note saved event
-  window.addEventListener("siwan-note-saved", (e) => {
-    if (e.detail?.title) {
-      checkAndAutoSummarize();
-    }
-  });
+  window.addEventListener("siwan-ai-scan-completed", handleScanCompleted);
 });
+
+onBeforeUnmount(() => {
+  window.removeEventListener("siwan-ai-scan-completed", handleScanCompleted);
+});
+
+function handleScanCompleted(e) {
+  const detail = e.detail;
+  if (!detail) return;
+  if (detail.title === props.currentDocTitle) {
+    if (detail.summary) {
+      summaryText.value = detail.summary;
+    }
+    summaryModel.value = detail.model || "AI Model";
+    isLoadingSummary.value = false;
+  }
+}
+
+watch(
+  () => globalStore.isAiScanning,
+  (scanning) => {
+    if (scanning && globalStore.aiScanningTitle === props.currentDocTitle) {
+      isLoadingSummary.value = true;
+    } else if (!scanning) {
+      isLoadingSummary.value = false;
+    }
+  }
+);
 
 watch(
   () => props.currentDocTitle,
@@ -295,9 +328,10 @@ watch(
     summaryText.value = "";
     messages.value = [];
     if (newTitle) {
-      checkAndAutoSummarize();
+      loadExistingSummary(newTitle);
     }
-  }
+  },
+  { immediate: true }
 );
 
 function togglePanel() {
@@ -308,30 +342,54 @@ function openSettings() {
   globalStore.isSettingsOpen = true;
 }
 
-async function checkAndAutoSummarize() {
+async function loadExistingSummary(title) {
+  if (!title) {
+    summaryText.value = "";
+    summaryModel.value = "";
+    return;
+  }
+  if (globalStore.isAiScanning && globalStore.aiScanningTitle === title) {
+    isLoadingSummary.value = true;
+    return;
+  }
   try {
-    const cfg = await getAiConfig();
-    if (cfg?.has_key && cfg?.auto_summarize && props.currentDocContent) {
-      triggerSummarize();
+    const res = await getDocumentSummary(title);
+    if (res?.summary) {
+      summaryText.value = res.summary;
+      summaryModel.value = res.model || "AI Model";
+    } else {
+      summaryText.value = "";
+      summaryModel.value = "";
     }
-  } catch (_) {}
+  } catch (_) {
+    summaryText.value = "";
+    summaryModel.value = "";
+  }
 }
 
 async function triggerSummarize() {
   if (!props.currentDocTitle || !props.currentDocContent) return;
+  if (globalStore.isAiScanning) return;
 
   isLoadingSummary.value = true;
   summaryText.value = "";
+  globalStore.isAiScanning = true;
+  globalStore.aiScanningTitle = props.currentDocTitle;
 
   try {
-    const res = await summarizeDocument(props.currentDocTitle, props.currentDocContent);
+    const res = await triggerAiScan(props.currentDocTitle, props.currentDocContent);
     summaryText.value = res.summary;
     summaryModel.value = res.model;
+    window.dispatchEvent(
+      new CustomEvent("siwan-ai-scan-completed", { detail: res })
+    );
   } catch (err) {
     const msg = err.response?.data?.detail || err.message || "总结失败";
     summaryText.value = `❌ 生成总结出错：${msg}`;
   } finally {
     isLoadingSummary.value = false;
+    globalStore.isAiScanning = false;
+    globalStore.aiScanningTitle = "";
   }
 }
 

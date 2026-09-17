@@ -1,6 +1,9 @@
 import json
 import os
 import re
+import time
+import secrets
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 import httpx
@@ -12,7 +15,7 @@ except ImportError:
     from server import security
     verify_admin = security.verify_admin
 
-router = APIRouter(prefix="/api/ai", tags=["ai"], dependencies=[Depends(verify_admin)])
+router = APIRouter(prefix="/api/ai", tags=["ai"])
 
 DEFAULT_SUMMARY_TEMPLATE = (
     "请严格按以下格式输出，内容紧凑、重点突出，包含：\n"
@@ -104,7 +107,7 @@ def get_config():
         "masked_key": mask_key(cfg.api_key)
     }
 
-@router.post("/config")
+@router.post("/config", dependencies=[Depends(verify_admin)])
 def update_config(data: Dict[str, Any]):
     cfg = load_ai_config()
     # Support ccSwitch / OpenAI / custom format conversions
@@ -330,3 +333,275 @@ async def chat_with_ai(req: AiChatRequest):
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"AI 对话请求失败: {str(e)}")
+
+class AiReviewRequest(BaseModel):
+    title: str
+    content: str
+
+class AiScanRequest(BaseModel):
+    title: str
+    content: str
+    custom_prompt: Optional[str] = None
+
+def get_notes_storage():
+    try:
+        import main
+        return main.get_note_storage()
+    except Exception:
+        from notes.file_system import FileSystemNotes
+        return FileSystemNotes()
+
+AI_UNIFIED_SCAN_PROMPT = """你是一个严谨客观的科研与技术专家第二读者助手（AI Reviewer & Summarizer）。
+请针对用户提供的文档《{title}》【同时完成以下两项任务】，并严格按指定的 JSON 结构返回：
+
+【任务一：文档结构化深度总结】
+提炼核心内容，格式紧凑、重点突出，使用 markdown 包含以下维度：
+📌 核心主旨与背景（1~2 句话概括定位）
+⚙️ 核心技术架构与算法机制（提炼 2-3 条要点）
+📊 关键实验指标与对标结论（若文档包含实验实测数据，重点提炼）
+💡 关键价值与后续启发（1~2 条）
+
+【任务二：第二读者批注草稿审查】
+审阅待审查正文，找出具体存在的问题，并提出简短中肯的修改建议。
+【审查类型严格限定为以下 5 种之一，严禁使用其他类型】：
+1. 事实存疑
+2. 逻辑跳跃
+3. 建议补充
+4. 术语不一致
+5. 表达冗余
+
+批注审查要求：
+1. 原文连续片段（quote）必须一字不差地在正文中真实存在（长度 5~40 字），严禁凭空捏造！
+2. 简要说明问题和修改建议，最终拼接为“类型：问题；建议：...”，总字数严格不超过 40 个字！
+3. 最多提出 5 条批注草稿；若文档无明显问题，返回空数组 []。
+
+【输出规范】：
+请仅输出合法的 JSON 对象，严禁包含任何前缀、解释、说明文字或 markdown 代码块标记。
+JSON 格式严格定义如下：
+{{
+  "summary": "这里是完整的 Markdown 结构化摘要总结",
+  "annotations": [
+    {{
+      "quote": "正文中真实存在的连续片段",
+      "type": "事实存疑|逻辑跳跃|建议补充|术语不一致|表达冗余",
+      "problem": "具体问题简述（10字以内）",
+      "suggestion": "具体修改建议（15字以内）"
+    }}
+  ]
+}}
+"""
+
+async def execute_unified_scan(title: str, content: str, custom_prompt: Optional[str] = None) -> Dict[str, Any]:
+    cfg = load_ai_config()
+    existing_annotations = security.get_note_annotations(title)
+    now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+
+    if not cfg.api_key.strip():
+        return {
+            "status": "skipped",
+            "message": "AI API Key 未配置，跳过自动扫描",
+            "title": title,
+            "summary": "",
+            "annotations": existing_annotations,
+            "new_annotations_count": 0,
+            "model": cfg.model,
+            "generatedAt": now_iso
+        }
+
+    content_snippet = content[:25000]
+    prompt = AI_UNIFIED_SCAN_PROMPT.format(title=title) + f"\n\n【待审查与总结的文档全文内容】：\n{content_snippet}"
+
+    url = f"{cfg.api_base}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {cfg.api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": cfg.model,
+        "messages": [
+            {"role": "system", "content": "你是一个严格返回合法 JSON 对象的分析引擎，不包含任何外部 markdown 代码块标记。"},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2
+    }
+
+    try:
+        async with get_http_client(cfg, timeout=75.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                return {
+                    "status": "error",
+                    "message": f"AI 服务响应错误 ({resp.status_code}): {resp.text[:200]}",
+                    "title": title,
+                    "summary": "",
+                    "annotations": existing_annotations,
+                    "new_annotations_count": 0,
+                    "model": cfg.model,
+                    "generatedAt": now_iso
+                }
+            result = resp.json()
+            choices = result.get("choices", [])
+            msg = choices[0].get("message", {}) if choices else {}
+            content_str = str(msg.get("content") or "").strip()
+            reasoning_str = str(msg.get("reasoning_content") or "").strip()
+
+            # Check if reasoning is embedded in <think>...</think> within content
+            think_match = re.search(r"<think>([\s\S]*?)</think>", content_str, flags=re.IGNORECASE)
+            if think_match:
+                if not reasoning_str:
+                    reasoning_str = think_match.group(1).strip()
+                clean_json = re.sub(r"<think>[\s\S]*?</think>", "", content_str, flags=re.IGNORECASE).strip()
+            else:
+                clean_json = content_str
+
+            code_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", clean_json)
+            if code_match:
+                clean_json = code_match.group(1).strip()
+
+            data = {}
+            try:
+                data = json.loads(clean_json)
+            except Exception:
+                m = re.search(r"\{[\s\S]*\}", clean_json)
+                if m:
+                    try:
+                        data = json.loads(m.group(0))
+                    except Exception as err:
+                        print(f"[SiWan_notes AI JSON fallback parse error]: {err}\nSnippet: {clean_json[:300]}")
+                else:
+                    print(f"[SiWan_notes AI No JSON block found]: {clean_json[:300]}")
+                    if clean_json:
+                        data = {"summary": clean_json, "annotations": []}
+
+            summary = str(data.get("summary", "")).strip()
+            if not summary and clean_json and "summary" not in data:
+                summary = clean_json
+
+            # Preserve thinking process for frontend thinking accordion UI
+            if reasoning_str:
+                if "<think>" not in summary:
+                    summary = f"<think>\n{reasoning_str}\n</think>\n\n{summary}"
+
+            raw_annotations = data.get("annotations", [])
+            if not isinstance(raw_annotations, list):
+                raw_annotations = []
+
+            ALLOWED_TYPES = {"事实存疑", "逻辑跳跃", "建议补充", "术语不一致", "表达冗余"}
+            new_annotations = []
+            existing_quotes = {a.get("quote", "").strip() for a in existing_annotations if a.get("quote")}
+
+            for item in raw_annotations[:5]:
+                if not isinstance(item, dict):
+                    continue
+                quote = str(item.get("quote", "")).strip()
+                c_type = str(item.get("type", "")).strip()
+                problem = str(item.get("problem", "")).strip()
+                suggestion = str(item.get("suggestion", "")).strip()
+
+                if not quote or quote not in content:
+                    continue
+                if quote in existing_quotes:
+                    continue
+                if c_type not in ALLOWED_TYPES:
+                    c_type = "建议补充"
+
+                # Standardized format: 类型：问题；建议：... (<= 40 chars)
+                formatted_comment = f"{c_type}：{problem}；建议：{suggestion}"
+                if len(formatted_comment) > 40:
+                    formatted_comment = formatted_comment[:39] + "…"
+
+                ann_id = f"ai_{int(time.time())}_{secrets.token_hex(3)}"
+                ai_ann = {
+                    "id": ann_id,
+                    "quote": quote,
+                    "comment": formatted_comment,
+                    "author_type": "ai",
+                    "comment_type": c_type,
+                    "status": "proposed",
+                    "createdAt": now_iso,
+                    "updatedAt": now_iso,
+                    "generatedAt": now_iso,
+                    "model": cfg.model,
+                    "created_at": now_iso
+                }
+                new_annotations.append(ai_ann)
+                existing_quotes.add(quote)
+
+            merged_annotations = list(existing_annotations)
+            if new_annotations:
+                merged_annotations.extend(new_annotations)
+                security.save_note_annotations(title, merged_annotations)
+
+            # Persist generated summary to disk
+            try:
+                security.save_note_summary(title, {
+                    "title": title,
+                    "summary": summary,
+                    "thinking": reasoning_str,
+                    "model": cfg.model,
+                    "generatedAt": now_iso
+                })
+            except Exception as ex:
+                print(f"[SiWan_notes AI] Save note summary error: {ex}")
+
+            # Update reviewed timestamp in note YAML front matter
+            try:
+                get_notes_storage().update_reviewed(title, now_iso)
+            except Exception as ex:
+                print(f"[SiWan_notes AI] Note front matter reviewed update error: {ex}")
+
+            return {
+                "status": "success",
+                "title": title,
+                "summary": summary,
+                "thinking": reasoning_str,
+                "annotations": merged_annotations,
+                "new_annotations_count": len(new_annotations),
+                "model": cfg.model,
+                "generatedAt": now_iso,
+                "reviewed": now_iso
+            }
+
+    except Exception as e:
+        print(f"[SiWan_notes AI Unified Scan Error]: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "title": title,
+            "summary": "",
+            "annotations": existing_annotations,
+            "new_annotations_count": 0,
+            "model": cfg.model,
+            "generatedAt": now_iso
+        }
+
+@router.get("/summary/{title:path}")
+def get_summary(title: str):
+    """Get previously saved AI summary for a note from disk (0 API calls)."""
+    data = security.get_note_summary(title)
+    return {
+        "title": title,
+        "summary": data.get("summary", ""),
+        "thinking": data.get("thinking", ""),
+        "model": data.get("model", ""),
+        "generatedAt": data.get("generatedAt", "")
+    }
+
+@router.post("/scan")
+async def scan_doc(req: AiScanRequest):
+    """Single-call background AI scan generating both structured summary and second-reader annotations."""
+    return await execute_unified_scan(req.title, req.content, req.custom_prompt)
+
+@router.post("/review")
+async def review_doc(req: AiReviewRequest):
+    """Review doc endpoint (leverages unified single-call execution)."""
+    res = await execute_unified_scan(req.title, req.content)
+    return {
+        "status": res["status"],
+        "message": res.get("message", ""),
+        "annotations": res.get("annotations", []),
+        "new_count": res.get("new_annotations_count", 0),
+        "summary": res.get("summary", ""),
+        "model": res.get("model", ""),
+        "generatedAt": res.get("generatedAt", "")
+    }

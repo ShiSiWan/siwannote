@@ -5,7 +5,7 @@
 <script setup>
 import Editor from "@toast-ui/editor";
 import "@toast-ui/editor/dist/i18n/zh-cn";
-import { onMounted, ref, watch } from "vue";
+import { onMounted, onBeforeUnmount, ref, watch } from "vue";
 
 import baseOptions from "./baseOptions.js";
 import { renderMathInDOM } from "./mathRenderer.js";
@@ -18,7 +18,7 @@ const props = defineProps({
   addImageBlobHook: Function,
 });
 
-const emit = defineEmits(["change", "keydown"]);
+const emit = defineEmits(["change", "save"]);
 
 const editorElement = ref();
 let toastEditor;
@@ -33,6 +33,25 @@ function refreshEditorMath() {
       renderMathInDOM(preview);
     }
   }, 150);
+}
+
+// Capture-phase keydown for editor shortcuts.
+// Intercept before toast-ui's own handlers (Ctrl+S saves)
+function handleShortcut(event) {
+  const isCtrl = event.ctrlKey || event.metaKey;
+  if (!isCtrl) return;
+
+  if (event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    event.stopPropagation();
+    emit("save");
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.stopPropagation();
+    emit("save");
+  }
 }
 
 onMounted(() => {
@@ -52,14 +71,13 @@ onMounted(() => {
         emit("change");
         refreshEditorMath();
       },
-      keydown: (_, event) => {
-        emit("keydown", event);
-      },
     },
     hooks: props.addImageBlobHook
       ? { addImageBlobHook: props.addImageBlobHook }
       : {},
   });
+
+  editorElement.value.addEventListener("keydown", handleShortcut, true);
 
   // Ensure content is explicitly loaded if initial was provided
   if (initial && (!toastEditor.getMarkdown() || !toastEditor.getMarkdown().trim())) {
@@ -67,6 +85,12 @@ onMounted(() => {
   }
 
   setTimeout(refreshEditorMath, 200);
+});
+
+onBeforeUnmount(() => {
+  if (editorElement.value) {
+    editorElement.value.removeEventListener("keydown", handleShortcut, true);
+  }
 });
 
 watch(

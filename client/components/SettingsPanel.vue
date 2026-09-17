@@ -72,7 +72,7 @@
           <p class="text-[11px] text-theme-text-muted">
             调整笔记正文及工作区的最大渲染宽度，适合不同分辨率屏幕。
           </p>
-          <div class="grid grid-cols-2 gap-2 pt-1 sm:grid-cols-3">
+          <div class="grid grid-cols-3 gap-2 pt-1">
             <button
               v-for="opt in pageWidthOptions"
               :key="opt.value"
@@ -930,13 +930,17 @@ const isOpen = computed({
 const activeTab = ref("page");
 const aiConfigMode = ref("form"); // 'form' | 'json'
 
-// Page Width
-const currentPageWidth = ref("1280px");
+// Page Width: 3 presets (紧凑, 标准, 全宽)
+function normalizeWidth(width) {
+  if (width === "100%") return "100%";
+  if (width === "1024px" || width === "1120px" || width === "1180px") return "1180px";
+  return "1440px";
+}
+
+const currentPageWidth = ref(normalizeWidth(localStorage.getItem("siwan_page_width")));
 const pageWidthOptions = [
-  { label: "紧凑 (1024px)", value: "1024px" },
-  { label: "标准 (1280px)", value: "1280px" },
-  { label: "宽屏 (1536px)", value: "1536px" },
-  { label: "超宽 (1800px)", value: "1800px" },
+  { label: "紧凑 (1180px)", value: "1180px" },
+  { label: "标准 (1440px)", value: "1440px" },
   { label: "全宽 (100%)", value: "100%" },
 ];
 
@@ -946,16 +950,28 @@ const pageWidthLabel = computed(() => {
 });
 
 function setPageWidth(width) {
-  currentPageWidth.value = width;
-  localStorage.setItem("siwan_page_width", width);
-  applyPageWidthToDom(width);
+  const normalized = normalizeWidth(width);
+  currentPageWidth.value = normalized;
+  localStorage.setItem("siwan_page_width", normalized);
+  applyPageWidthToDom(normalized);
+  // Sync with App.vue's responsive width binding
+  window.dispatchEvent(new CustomEvent("siwan-page-width-changed", { detail: normalized }));
 }
 
 function applyPageWidthToDom(width) {
-  const mainContainers = document.querySelectorAll(".app-main-container");
-  mainContainers.forEach((el) => {
+  const contentContainers = document.querySelectorAll("[data-app-content]");
+  contentContainers.forEach((el) => {
+    if (el.classList.contains("min-h-screen") && !el.classList.contains("mx-auto")) {
+      el.style.maxWidth = "";
+      return;
+    }
     el.style.maxWidth = width;
   });
+  // Clean up any stale inline maxWidth on outer root container if present
+  const appRoot = document.querySelector("#app > div");
+  if (appRoot && !appRoot.classList.contains("mx-auto") && appRoot.style.maxWidth) {
+    appRoot.style.maxWidth = "";
+  }
 }
 
 // Theme
@@ -1631,7 +1647,7 @@ const showLogOutButton = computed(() => {
 });
 
 onMounted(() => {
-  const savedWidth = localStorage.getItem("siwan_page_width") || "1280px";
+  const savedWidth = normalizeWidth(localStorage.getItem("siwan_page_width"));
   currentPageWidth.value = savedWidth;
   applyPageWidthToDom(savedWidth);
 
@@ -1653,7 +1669,7 @@ watch(isOpen, (val) => {
   if (val) {
     loadAiData();
     checkSecurityStatus();
-    const savedWidth = localStorage.getItem("siwan_page_width") || "1280px";
+    const savedWidth = normalizeWidth(localStorage.getItem("siwan_page_width"));
     applyPageWidthToDom(savedWidth);
   }
 });

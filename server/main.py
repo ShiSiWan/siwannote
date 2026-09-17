@@ -143,12 +143,13 @@ def get_note(title: str, request: Request):
     is_admin = security.is_admin_token(auth_header)
     if not is_admin:
         perms = security.get_permissions()
-        public_list = perms.get("public_notes")
-        if public_list is not None and title not in public_list:
-            raise HTTPException(
-                status_code=403,
-                detail="该文档未对外开放，仅管理员登录后可见。"
-            )
+        if not perms.get("all_public", True):
+            public_list = perms.get("public_notes", [])
+            if title not in public_list:
+                raise HTTPException(
+                    status_code=403,
+                    detail="该文档未对外开放，仅管理员登录后可见。"
+                )
 
     try:
         return get_note_storage().get(title)
@@ -265,7 +266,7 @@ def delete_note(title: str, request: Request):
 def search(
     request: Request,
     term: str,
-    sort: Literal["score", "title", "lastModified"] = "score",
+    sort: Literal["score", "title", "lastModified", "last_modified"] = "score",
     order: Literal["asc", "desc"] = "desc",
     limit: int = None,
 ):
@@ -278,8 +279,8 @@ def search(
     is_admin = security.is_admin_token(auth_header)
     if not is_admin:
         perms = security.get_permissions()
-        public_list = perms.get("public_notes")
-        if public_list is not None:
+        if not perms.get("all_public", True):
+            public_list = perms.get("public_notes", [])
             public_set = set(public_list)
             results = [r for r in results if r.title in public_set]
 

@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import { getSiteConfig } from "./api.js";
 
 export const useGlobalStore = defineStore("global", () => {
@@ -8,8 +8,56 @@ export const useGlobalStore = defineStore("global", () => {
   const currentDocContent = ref("");
   const isSettingsOpen = ref(false);
   const isAiPanelOpen = ref(false);
-  
-  // Custom Site Branding
+  const isAnnotationPanelOpen = ref(false);
+
+  // App Modes: "reading" (阅读模式) vs "creation" (创作模式)
+  const currentMode = ref("reading");
+  // Creation Mode Sub-views: "source" (源码视图) vs "preview" (预览视图)
+  const creationSubView = ref(localStorage.getItem("siwan_creation_subview") || "source");
+
+  // Sidebar Push State (DeepSeek style, mode-specific width)
+  const isDesktop = typeof window !== "undefined" ? window.innerWidth >= 1024 : true;
+  const initialSidebarOpen = isDesktop
+    ? localStorage.getItem("siwan_sidebar_open") !== "0"
+    : false;
+  const isSidebarOpen = ref(initialSidebarOpen);
+
+  const sidebarWidth = ref(
+    Math.min(
+      Math.max(
+        parseInt(
+          localStorage.getItem("siwan_sidebar_width") ||
+            localStorage.getItem("siwan_sidebar_width_reading")
+        ) || 280,
+        200
+      ),
+      520
+    )
+  );
+
+  const isAiScanning = ref(false);
+  const aiScanningTitle = ref("");
+
+  function toggleSidebar() {
+    isSidebarOpen.value = !isSidebarOpen.value;
+    localStorage.setItem("siwan_sidebar_open", isSidebarOpen.value ? "1" : "0");
+    window.dispatchEvent(
+      new CustomEvent("siwan-sidebar-toggle", {
+        detail: { isOpen: isSidebarOpen.value, width: sidebarWidth.value },
+      })
+    );
+  }
+
+  function setSidebarWidth(width) {
+    const clamped = Math.min(Math.max(width, 200), 520);
+    sidebarWidth.value = clamped;
+    localStorage.setItem("siwan_sidebar_width", String(clamped));
+  }
+
+  function setCreationSubView(view) {
+    creationSubView.value = view;
+    localStorage.setItem("siwan_creation_subview", view);
+  }
   const siteTitle = ref(localStorage.getItem("siwan_site_title") || "siwannote");
   const siteSubtitle = ref(localStorage.getItem("siwan_site_subtitle") || "SLAM & KNOWLEDGE LAB");
 
@@ -44,6 +92,16 @@ export const useGlobalStore = defineStore("global", () => {
     currentDocContent,
     isSettingsOpen,
     isAiPanelOpen,
+    isAnnotationPanelOpen,
+    currentMode,
+    creationSubView,
+    setCreationSubView,
+    isSidebarOpen,
+    sidebarWidth,
+    isAiScanning,
+    aiScanningTitle,
+    toggleSidebar,
+    setSidebarWidth,
     siteTitle,
     siteSubtitle,
     loadSiteBranding,

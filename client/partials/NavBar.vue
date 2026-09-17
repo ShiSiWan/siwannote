@@ -27,19 +27,8 @@ defineProps({
 <style scoped>
 /* Desktop only: Offset logo when sidebar is closed to not overlap top-left action box */
 @media (min-width: 768px) {
-  :global(body:not(.fn-sidebar-open)) .navbar-brand-logo {
-    padding-left: 11rem;
-  }
-
-  :global(body.fn-sidebar-open) .navbar-brand-logo {
-    padding-left: 0.5rem;
-  }
-}
-
-/* Mobile: Perfectly centered and natural alignment */
-@media (max-width: 767px) {
   .navbar-brand-logo {
-    padding-left: 0 !important;
+    padding-left: 0;
   }
 }
 </style>

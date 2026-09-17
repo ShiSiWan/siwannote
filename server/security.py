@@ -3,7 +3,7 @@ import os
 import time
 import secrets
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -28,6 +28,9 @@ def get_permissions_file() -> str:
 def get_comments_file() -> str:
     return os.path.join(get_data_dir(), ".siwan_comments.json")
 
+def get_annotations_file() -> str:
+    return os.path.join(get_data_dir(), ".siwan_annotations.json")
+
 def get_ip_stats_file() -> str:
     return os.path.join(get_data_dir(), ".siwan_ip_stats.json")
 
@@ -43,6 +46,18 @@ class AdminLoginRequest(BaseModel):
 class CommentCreateRequest(BaseModel):
     author: str
     content: str
+
+class AnnotationCreateRequest(BaseModel):
+    quote: str
+    comment: str
+    author_type: Optional[str] = "user"
+    comment_type: Optional[str] = None
+    status: Optional[str] = "accepted"
+    model: Optional[str] = None
+
+class AnnotationUpdateRequest(BaseModel):
+    status: Optional[str] = None
+    comment: Optional[str] = None
 
 class BlacklistRequest(BaseModel):
     ip: str
@@ -88,6 +103,94 @@ def get_comments_data() -> Dict[str, List[Dict[str, Any]]]:
 def save_comments_data(data: Dict[str, List[Dict[str, Any]]]) -> None:
     save_json(get_comments_file(), data)
 
+def get_annotations_data() -> Dict[str, List[Dict[str, Any]]]:
+    return load_json(get_annotations_file(), {})
+
+def save_annotations_data(data: Dict[str, List[Dict[str, Any]]]) -> None:
+    save_json(get_annotations_file(), data)
+
+def get_note_comments_paths(title: str) -> Tuple[str, str]:
+    """
+    Returns (per_note_comments_file, dir_comments_file) in the note's same directory.
+    e.g. note at /data/SLAM/intro.md:
+      per_note: /data/SLAM/intro.comments.json
+      dir_comments: /data/SLAM/.comments.json
+    """
+    storage_path = get_data_dir()
+    clean_title = title.replace("\\", "/").strip("/")
+    note_path = os.path.join(storage_path, clean_title + ".md")
+    note_dir = os.path.dirname(note_path)
+    base_name = os.path.splitext(os.path.basename(note_path))[0]
+    per_note_file = os.path.join(note_dir, f"{base_name}.comments.json")
+    dir_comments_file = os.path.join(note_dir, ".comments.json")
+    return per_note_file, dir_comments_file
+
+def get_note_summary_path(title: str) -> str:
+    storage_path = get_data_dir()
+    clean_title = title.replace("\\", "/").strip("/")
+    note_path = os.path.join(storage_path, clean_title + ".md")
+    note_dir = os.path.dirname(note_path)
+    base_name = os.path.splitext(os.path.basename(note_path))[0]
+    return os.path.join(note_dir, f"{base_name}.summary.json")
+
+def get_note_summary(title: str) -> Dict[str, Any]:
+    summary_file = get_note_summary_path(title)
+    if os.path.exists(summary_file):
+        return load_json(summary_file, {})
+    return {}
+
+def save_note_summary(title: str, summary_data: Dict[str, Any]) -> None:
+    summary_file = get_note_summary_path(title)
+    os.makedirs(os.path.dirname(summary_file), exist_ok=True)
+    save_json(summary_file, summary_data)
+
+def get_note_annotations(title: str) -> List[Dict[str, Any]]:
+    per_note_file, dir_comments_file = get_note_comments_paths(title)
+
+    # 1. Per-note structured comments file: {title}.comments.json
+    if os.path.exists(per_note_file):
+        data = load_json(per_note_file, [])
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and "annotations" in data:
+            return data["annotations"]
+
+    # 2. Directory-level .comments.json in note's same directory
+    if os.path.exists(dir_comments_file):
+        dir_data = load_json(dir_comments_file, {})
+        base_name = os.path.splitext(os.path.basename(title))[0]
+        if title in dir_data and isinstance(dir_data[title], list):
+            return dir_data[title]
+        if base_name in dir_data and isinstance(dir_data[base_name], list):
+            return dir_data[base_name]
+
+    # 3. Fallback to global legacy annotations file
+    legacy_data = get_annotations_data()
+    return legacy_data.get(title, [])
+
+def save_note_annotations(title: str, annotations: List[Dict[str, Any]]) -> None:
+    per_note_file, dir_comments_file = get_note_comments_paths(title)
+    note_dir = os.path.dirname(per_note_file)
+    os.makedirs(note_dir, exist_ok=True)
+
+    # 1. Save per-note file in same directory
+    save_json(per_note_file, annotations)
+
+    # 2. Also sync to .comments.json in the same directory
+    dir_data = load_json(dir_comments_file, {}) if os.path.exists(dir_comments_file) else {}
+    base_name = os.path.splitext(os.path.basename(title))[0]
+    dir_data[base_name] = annotations
+    dir_data[title] = annotations
+    save_json(dir_comments_file, dir_data)
+
+    # 3. Keep legacy global file in sync for backward compatibility
+    try:
+        global_data = get_annotations_data()
+        global_data[title] = annotations
+        save_annotations_data(global_data)
+    except Exception:
+        pass
+
 def get_ip_data() -> Dict[str, Any]:
     default = {
         "stats": {},
@@ -106,6 +209,9 @@ def create_access_token(username: str, remember_me: bool = True) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 def is_admin_token(token: Optional[str]) -> bool:
+    auth_type = os.environ.get("SIWAN_AUTH_TYPE", os.environ.get("FLATNOTES_AUTH_TYPE", "")).lower()
+    if auth_type == "none":
+        return True
     if not token:
         return False
     try:
@@ -115,6 +221,9 @@ def is_admin_token(token: Optional[str]) -> bool:
         return False
 
 def verify_admin(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> bool:
+    auth_type = os.environ.get("SIWAN_AUTH_TYPE", os.environ.get("FLATNOTES_AUTH_TYPE", "")).lower()
+    if auth_type == "none":
+        return True
     if not credentials or not is_admin_token(credentials.credentials):
         raise HTTPException(status_code=401, detail="需要管理员权限，请先登录管理员账号。")
     return True
@@ -371,6 +480,106 @@ def delete_comment(title: str, comment_id: str, _: bool = Depends(verify_admin))
     comments_data[title] = filtered
     save_comments_data(comments_data)
     return {"status": "success", "comments": filtered, "message": "评论已删除"}
+
+# --- Annotations API (Admin Only: 管理员批注/书签模式，保存在笔记同目录下) ---
+@security_router.get("/annotations/{title:path}")
+def get_annotations(title: str, _: bool = Depends(verify_admin)):
+    note_annotations = get_note_annotations(title)
+    return {
+        "status": "success",
+        "annotations": note_annotations,
+    }
+
+@security_router.post("/annotations/{title:path}")
+def add_annotation(title: str, req: AnnotationCreateRequest, _: bool = Depends(verify_admin)):
+    quote = req.quote.strip() if req.quote else ""
+    comment = req.comment.strip() if req.comment else ""
+
+    if not quote:
+        raise HTTPException(status_code=400, detail="批注必须选中一段原文内容")
+    if len(quote) > 2000:
+        raise HTTPException(status_code=400, detail="批注引用的原文过长，不能超过 2000 字")
+    if not comment:
+        raise HTTPException(status_code=400, detail="批注内容不能为空")
+    if len(comment) > 2000:
+        raise HTTPException(status_code=400, detail="批注内容过长，不能超过 2000 字")
+
+    matched = check_sensitive_content(comment)
+    if matched:
+        raise HTTPException(status_code=400, detail="批注内容包含违规、敏感或辱骂词汇，请文明批注")
+
+    note_annotations = list(get_note_annotations(title))
+
+    now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+    annotation_id = f"a_{int(time.time())}_{secrets.token_hex(3)}"
+    new_annotation = {
+        "id": annotation_id,
+        "quote": quote,
+        "comment": comment,
+        "author_type": req.author_type or "user",
+        "comment_type": req.comment_type,
+        "status": req.status or "accepted",
+        "createdAt": now_iso,
+        "updatedAt": now_iso,
+        "created_at": now_iso,
+    }
+    if req.author_type == "ai":
+        new_annotation["generatedAt"] = now_iso
+        new_annotation["model"] = req.model or "ai"
+
+    note_annotations.append(new_annotation)
+    save_note_annotations(title, note_annotations)
+
+    return {
+        "status": "success",
+        "annotations": note_annotations,
+        "annotation": new_annotation,
+    }
+
+@security_router.patch("/annotations/{title:path}/{annotation_id}")
+def patch_annotation(title: str, annotation_id: str, req: AnnotationUpdateRequest, _: bool = Depends(verify_admin)):
+    note_annotations = get_note_annotations(title)
+    updated_item = None
+    now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+    for item in note_annotations:
+        if item.get("id") == annotation_id:
+            if req.status is not None:
+                item["status"] = req.status
+                if req.status in ("accepted", "modified_accepted", "rejected"):
+                    item["resolvedAt"] = now_iso
+                elif req.status == "proposed":
+                    item.pop("resolvedAt", None)
+            if req.comment is not None:
+                comment_clean = req.comment.strip()
+                matched = check_sensitive_content(comment_clean)
+                if matched:
+                    raise HTTPException(status_code=400, detail="修改内容包含违规、敏感或辱骂词汇")
+                item["comment"] = comment_clean
+            item["updatedAt"] = now_iso
+            updated_item = item
+            break
+
+    if not updated_item:
+        raise HTTPException(status_code=404, detail="未找到该批注")
+
+    save_note_annotations(title, note_annotations)
+    return {
+        "status": "success",
+        "annotations": note_annotations,
+        "annotation": updated_item,
+        "message": "批注状态已更新",
+    }
+
+@security_router.delete("/annotations/{title:path}/{annotation_id}")
+def delete_annotation(title: str, annotation_id: str, _: bool = Depends(verify_admin)):
+    note_annotations = get_note_annotations(title)
+    filtered = [a for a in note_annotations if a.get("id") != annotation_id]
+    save_note_annotations(title, filtered)
+    return {
+        "status": "success",
+        "annotations": filtered,
+        "message": "批注已删除",
+    }
 
 # --- IP Management & Blacklist API (Admin Only) ---
 @security_router.get("/ip-stats")

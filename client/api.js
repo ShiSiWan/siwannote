@@ -76,10 +76,11 @@ export async function authCheck() {
 
 export async function getNotes(term, sort, order, limit) {
   try {
+    const normalizedSort = sort === "last_modified" ? "lastModified" : sort;
     const response = await api.get("api/search", {
       params: {
         term: term,
-        sort: sort,
+        sort: normalizedSort,
         order: order,
         limit: limit,
       },
@@ -180,6 +181,15 @@ export async function summarizeDocument(title, content) {
       title: title,
       content: content,
     });
+    return response.data;
+  } catch (response) {
+    return Promise.reject(response);
+  }
+}
+
+export async function getDocumentSummary(title) {
+  try {
+    const response = await api.get(`api/ai/summary/${encodeURIComponent(title)}`);
     return response.data;
   } catch (response) {
     return Promise.reject(response);
@@ -294,6 +304,73 @@ export async function postComment(title, author, content) {
 export async function deleteComment(title, commentId) {
   try {
     const response = await api.delete(`api/security/comments/${encodeURIComponent(title)}/${commentId}`);
+    return response.data;
+  } catch (response) {
+    return Promise.reject(response);
+  }
+}
+
+export async function getAnnotations(title) {
+  try {
+    const response = await api.get(`api/security/annotations/${encodeURIComponent(title)}`);
+    return response.data;
+  } catch (response) {
+    return Promise.reject(response);
+  }
+}
+
+export async function addAnnotation(title, quote, comment) {
+  try {
+    const response = await api.post(`api/security/annotations/${encodeURIComponent(title)}`, {
+      quote,
+      comment,
+    });
+    return response.data;
+  } catch (response) {
+    return Promise.reject(response);
+  }
+}
+
+export async function updateAnnotation(title, annotationId, data) {
+  try {
+    const response = await api.patch(
+      `api/security/annotations/${encodeURIComponent(title)}/${annotationId}`,
+      data
+    );
+    return response.data;
+  } catch (response) {
+    return Promise.reject(response);
+  }
+}
+
+export async function deleteAnnotation(title, annotationId) {
+  try {
+    const response = await api.delete(`api/security/annotations/${encodeURIComponent(title)}/${annotationId}`);
+    return response.data;
+  } catch (response) {
+    return Promise.reject(response);
+  }
+}
+
+export async function triggerAiReview(title, content) {
+  try {
+    const response = await api.post("api/ai/review", {
+      title,
+      content,
+    });
+    return response.data;
+  } catch (response) {
+    return Promise.reject(response);
+  }
+}
+
+export async function triggerAiScan(title, content, customPrompt = null) {
+  try {
+    const response = await api.post("api/ai/scan", {
+      title,
+      content,
+      custom_prompt: customPrompt,
+    });
     return response.data;
   } catch (response) {
     return Promise.reject(response);
