@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import time
@@ -8,6 +9,24 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
+
+def hash_password(password: str) -> str:
+    """Hash password with a unique cryptographic salt using SHA-256."""
+    salt = secrets.token_hex(16)
+    digest = hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+    return f"sha256${salt}${digest}"
+
+def verify_password(plain_password: str, stored_hash_or_plain: str) -> bool:
+    """Verify password against stored salt+hash or legacy format using constant-time comparison."""
+    if not stored_hash_or_plain or not plain_password:
+        return False
+    if stored_hash_or_plain.startswith("sha256$"):
+        parts = stored_hash_or_plain.split("$")
+        if len(parts) == 3:
+            salt, expected_digest = parts[1], parts[2]
+            actual_digest = hashlib.sha256((salt + plain_password).encode("utf-8")).hexdigest()
+            return secrets.compare_digest(actual_digest, expected_digest)
+    return secrets.compare_digest(plain_password, stored_hash_or_plain)
 
 security_router = APIRouter(prefix="/api/security", tags=["security"])
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -71,7 +90,7 @@ def get_ip_stats_file() -> str:
 
 # Default Admin credentials
 ADMIN_USERNAME = os.environ.get("SIWAN_USERNAME", os.environ.get("FLATNOTES_USERNAME", "admin"))
-ADMIN_PASSWORD = os.environ.get("SIWAN_PASSWORD", os.environ.get("FLATNOTES_PASSWORD", "admin123"))
+ENV_ADMIN_PASSWORD = os.environ.get("SIWAN_PASSWORD") or os.environ.get("FLATNOTES_PASSWORD")
 
 class AdminLoginRequest(BaseModel):
     username: str
@@ -120,15 +139,32 @@ def save_json(filepath: str, data: Any) -> None:
     atomic_save_json(filepath, data)
 
 def get_permissions() -> Dict[str, Any]:
-    default = {
-        "public_notes": [],
-        "all_public": False,
-        "admin_password": ADMIN_PASSWORD,
-        "token_version": 1
-    }
-    data = load_json(get_permissions_file(), default)
-    if not isinstance(data, dict):
-        data = default
+    perms_file = get_permissions_file()
+    data = load_json(perms_file, None)
+    if data is None or not isinstance(data, dict):
+        init_pwd = ENV_ADMIN_PASSWORD
+        if not init_pwd:
+            init_pwd = secrets.token_urlsafe(12)
+            print(f"[Security] ⚠️ 首次启动未设置密码，已自动生成初始管理员密码: {init_pwd}")
+            print("[Security] 💡 请妥善保管此密码并在右上角「设置」中登录修改。")
+        data = {
+            "public_notes": [],
+            "all_public": False,
+            "admin_password": hash_password(init_pwd),
+            "token_version": 1
+        }
+        save_permissions(data)
+        return data
+
+    if "admin_password" not in data or not data["admin_password"]:
+        init_pwd = ENV_ADMIN_PASSWORD or secrets.token_urlsafe(12)
+        data["admin_password"] = hash_password(init_pwd)
+        save_permissions(data)
+    elif not data["admin_password"].startswith("sha256$"):
+        # Auto-upgrade legacy plain text password to salted SHA-256 hash
+        data["admin_password"] = hash_password(data["admin_password"])
+        save_permissions(data)
+
     if "token_version" not in data:
         data["token_version"] = 1
     if "all_public" not in data:
@@ -367,9 +403,9 @@ def admin_login(req: AdminLoginRequest, request: Request):
     check_login_rate_limit(client_ip)
 
     perms = get_permissions()
-    expected_password = perms.get("admin_password", ADMIN_PASSWORD)
+    expected_password = perms.get("admin_password")
     
-    if req.username.strip().lower() == ADMIN_USERNAME.lower() and req.password == expected_password:
+    if req.username.strip().lower() == ADMIN_USERNAME.lower() and verify_password(req.password, expected_password):
         clear_login_failures(client_ip)
         token = create_access_token(req.username, remember_me=req.remember_me)
         return {
@@ -390,15 +426,15 @@ def change_password(req: ChangePasswordRequest, request: Request):
         raise HTTPException(status_code=403, detail="无权限：仅管理员登录后可修改密码。")
     
     perms = get_permissions()
-    current_expected = perms.get("admin_password", ADMIN_PASSWORD)
-    if req.old_password != current_expected:
+    current_expected = perms.get("admin_password")
+    if not verify_password(req.old_password, current_expected):
         raise HTTPException(status_code=400, detail="原密码不正确，请重新输入。")
     
     new_pwd = req.new_password.strip()
     if len(new_pwd) < 4:
         raise HTTPException(status_code=400, detail="新密码长度不能少于 4 位字符。")
     
-    perms["admin_password"] = new_pwd
+    perms["admin_password"] = hash_password(new_pwd)
     # Bump token_version to immediately revoke all existing tokens on all other devices/browsers
     new_ver = int(time.time())
     perms["token_version"] = new_ver

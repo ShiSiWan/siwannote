@@ -145,6 +145,7 @@ class FileSystemNotes(BaseNotes):
 
     def create(self, data: NoteCreate) -> Note:
         """Create a new note."""
+        is_valid_filename(data.title)
         filepath = self._path_from_title(data.title)
         now_iso = now_iso8601()
         inc_meta, body = parse_note_file(data.content or "", filepath, data.title)
@@ -312,9 +313,10 @@ class FileSystemNotes(BaseNotes):
         return new_path
 
     def _path_from_title(self, title: str) -> str:
+        is_valid_filename(title)
         clean_title = title.replace("\\", "/").strip("/")
-        filepath = os.path.realpath(os.path.join(self.storage_path, clean_title + MARKDOWN_EXT))
         storage_real = os.path.realpath(self.storage_path)
+        filepath = os.path.realpath(os.path.join(storage_real, clean_title + MARKDOWN_EXT))
         if not filepath.startswith(storage_real + os.sep) and filepath != storage_real:
             raise ValueError(f"Invalid note path outside storage: '{title}'")
         return filepath
@@ -563,3 +565,12 @@ class FileSystemNotes(BaseNotes):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w" if overwrite else "x", encoding="utf-8") as f:
             f.write(content)
+
+    def close(self) -> None:
+        """Clean up resources like Whoosh index."""
+        if hasattr(self, "index") and self.index:
+            try:
+                self.index.close()
+            except Exception as e:
+                logger.warning(f"Error closing Whoosh index: {e}")
+

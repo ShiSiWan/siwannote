@@ -1,13 +1,25 @@
+import base64
+import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
 import time
 import secrets
+import urllib.parse
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+
+try:
+    from cryptography.fernet import Fernet
+    _HAS_CRYPTOGRAPHY = True
+except ImportError:
+    _HAS_CRYPTOGRAPHY = False
+
 try:
     import security
     verify_admin = security.verify_admin
@@ -63,24 +75,130 @@ def get_ai_config_file() -> str:
         storage = os.environ.get("SIWAN_PATH", os.environ.get("FLATNOTES_PATH", "/data"))
     return os.path.join(storage, ".siwan_ai_config.json")
 
+def _get_fernet_cipher() -> Optional[Any]:
+    if not _HAS_CRYPTOGRAPHY:
+        return None
+    try:
+        secret = security.get_jwt_secret()
+        key_32 = hashlib.sha256(secret.encode("utf-8")).digest()
+        fernet_key = base64.urlsafe_b64encode(key_32)
+        return Fernet(fernet_key)
+    except Exception:
+        return None
+
+def encrypt_api_key(plain_key: str) -> str:
+    if not plain_key:
+        return ""
+    if plain_key.startswith("enc:"):
+        return plain_key
+    cipher = _get_fernet_cipher()
+    if cipher:
+        try:
+            return "enc:" + cipher.encrypt(plain_key.encode("utf-8")).decode("utf-8")
+        except Exception:
+            pass
+    encoded = base64.b64encode(plain_key.encode("utf-8")).decode("utf-8")
+    return "enc:b64:" + encoded
+
+def decrypt_api_key(encrypted_key: str) -> str:
+    if not encrypted_key:
+        return ""
+    if not encrypted_key.startswith("enc:"):
+        return encrypted_key
+    raw = encrypted_key[4:]
+    if raw.startswith("b64:"):
+        try:
+            return base64.b64decode(raw[4:].encode("utf-8")).decode("utf-8")
+        except Exception:
+            return ""
+    cipher = _get_fernet_cipher()
+    if cipher:
+        try:
+            return cipher.decrypt(raw.encode("utf-8")).decode("utf-8")
+        except Exception:
+            pass
+    return ""
+
+def validate_safe_url(url: str, is_proxy: bool = False) -> None:
+    """Validate URL to protect against SSRF (Server-Side Request Forgery).
+    Rejects private networks, loopback addresses, and cloud metadata services.
+    """
+    if not url or not url.strip():
+        return
+    clean_url = url.strip()
+
+    if os.environ.get("SIWAN_AI_ALLOW_PRIVATE_NETWORKS", "0").lower() in ("1", "true"):
+        return
+
+    parsed = urllib.parse.urlparse(clean_url)
+    valid_schemes = ("http", "https") if not is_proxy else ("http", "https", "socks5", "socks5h", "socks")
+    if not parsed.scheme or parsed.scheme.lower() not in valid_schemes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法协议方案: '{parsed.scheme}'。仅支持 {', '.join(valid_schemes)}。"
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(status_code=400, detail="URL 缺少有效主机名。")
+
+    host_lower = hostname.lower()
+    if host_lower in ("localhost", "ip6-localhost", "ip6-loopback") or host_lower.endswith((".local", ".internal", ".lan")):
+        raise HTTPException(
+            status_code=400,
+            detail="安全拦截：禁止访问内网或本地保留域名 (SSRF 防护)。若需要本地私有模型，请设置环境变量 SIWAN_AI_ALLOW_PRIVATE_NETWORKS=true。"
+        )
+
+    try:
+        ip = ipaddress.ip_address(host_lower.strip("[]"))
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise HTTPException(
+                status_code=400,
+                detail=f"安全拦截：目标 IP {ip} 属于受限的内网或保留地址 (SSRF 防护)。若需要本地私有模型，请设置环境变量 SIWAN_AI_ALLOW_PRIVATE_NETWORKS=true。"
+            )
+        return
+    except ValueError:
+        pass
+
+    try:
+        addr_infos = socket.getaddrinfo(host_lower, None)
+        for item in addr_infos:
+            ip_str = item[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"安全拦截：域名 {hostname} 解析到受限内网地址 {ip_str} (SSRF 防护)。若需要本地私有模型，请设置环境变量 SIWAN_AI_ALLOW_PRIVATE_NETWORKS=true。"
+                )
+    except socket.gaierror:
+        pass
+
 def load_ai_config() -> AiConfig:
     cfg_file = get_ai_config_file()
     if os.path.exists(cfg_file):
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return AiConfig(**data)
+                if isinstance(data, dict):
+                    if "api_key" in data and data["api_key"]:
+                        data["api_key"] = decrypt_api_key(data["api_key"])
+                    return AiConfig(**data)
         except Exception as e:
             print(f"[SiWan_notes AI] Failed to load config: {e}")
     return AiConfig()
 
 def save_ai_config(config: AiConfig) -> None:
     cfg_file = get_ai_config_file()
-    atomic_save_json(cfg_file, config.dict())
+    data = config.dict()
+    if data.get("api_key"):
+        data["api_key"] = encrypt_api_key(data["api_key"])
+    atomic_save_json(cfg_file, data, mode=0o600)
 
 def get_http_client(cfg: AiConfig, timeout: float = 60.0) -> httpx.AsyncClient:
+    validate_safe_url(cfg.api_base, is_proxy=False)
     proxy = (cfg.proxy_url or "").strip()
     if proxy and proxy.lower() not in ("none", "direct", "off", "false", "0"):
+        validate_safe_url(proxy, is_proxy=True)
         # Normalize socks:// to socks5:// for httpx socksio
         if proxy.startswith("socks://"):
             proxy = "socks5://" + proxy[len("socks://"):]
@@ -116,7 +234,9 @@ def update_config(data: Dict[str, Any]):
     # Support ccSwitch / OpenAI / custom format conversions
     api_base = data.get("api_base") or data.get("baseURL") or data.get("baseUrl")
     if api_base:
-        cfg.api_base = str(api_base).strip().rstrip("/")
+        clean_base = str(api_base).strip().rstrip("/")
+        validate_safe_url(clean_base, is_proxy=False)
+        cfg.api_base = clean_base
     
     api_key = data.get("api_key") or data.get("apiKey")
     if api_key is not None:
@@ -134,7 +254,10 @@ def update_config(data: Dict[str, Any]):
         cfg.model = str(model).strip()
         
     if "proxy_url" in data:
-        cfg.proxy_url = str(data["proxy_url"]).strip() if data["proxy_url"] else ""
+        clean_proxy = str(data["proxy_url"]).strip() if data["proxy_url"] else ""
+        if clean_proxy:
+            validate_safe_url(clean_proxy, is_proxy=True)
+        cfg.proxy_url = clean_proxy
         
     if "auto_summarize" in data:
         cfg.auto_summarize = bool(data["auto_summarize"])

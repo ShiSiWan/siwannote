@@ -12,6 +12,11 @@ from qrcode import QRCode
 from global_config import AuthType, GlobalConfig
 from helpers import get_env
 
+try:
+    import security
+except ImportError:
+    from server import security
+
 from ..base import BaseAuth
 from ..models import Login, Token
 
@@ -24,8 +29,6 @@ class LocalAuth(BaseAuth):
 
     def __init__(self) -> None:
         self.username = get_env("SIWAN_USERNAME", fallback_keys=["FLATNOTES_USERNAME"], mandatory=False, default="admin").lower()
-        self.password = get_env("SIWAN_PASSWORD", fallback_keys=["FLATNOTES_PASSWORD"], mandatory=False, default="admin123")
-        self.secret_key = get_env("SIWAN_SECRET_KEY", fallback_keys=["FLATNOTES_SECRET_KEY"], mandatory=False, default="siwan-notes-secret-key-2026")
         self.session_expiry_days = get_env(
             "SIWAN_SESSION_EXPIRY_DAYS", fallback_keys=["FLATNOTES_SESSION_EXPIRY_DAYS"], default=30, cast_int=True
         )
@@ -47,27 +50,29 @@ class LocalAuth(BaseAuth):
         )
 
         # Check Password & TOTP
-        expected_password = self.password
+        perms = security.get_permissions()
+        stored_password_hash = perms.get("admin_password", "")
+
         if self.is_totp_enabled:
             current_totp = self.totp.now()
-            expected_password += current_totp
-        password_correct = secrets.compare_digest(
-            expected_password, data.password
-        )
+            if len(data.password) > 6:
+                plain_pwd = data.password[:-6]
+                input_totp = data.password[-6:]
+                password_correct = (
+                    security.verify_password(plain_pwd, stored_password_hash)
+                    and secrets.compare_digest(current_totp, input_totp)
+                    and (current_totp != self.last_used_totp)
+                )
+                if password_correct:
+                    self.last_used_totp = current_totp
+            else:
+                password_correct = False
+        else:
+            password_correct = security.verify_password(data.password, stored_password_hash)
 
         # Raise error if incorrect
-        if not (
-            username_correct
-            and password_correct
-            # Prevent TOTP from being reused
-            and (
-                self.is_totp_enabled is False
-                or current_totp != self.last_used_totp
-            )
-        ):
+        if not (username_correct and password_correct):
             raise ValueError("Incorrect login credentials.")
-        if self.is_totp_enabled:
-            self.last_used_totp = current_totp
 
         # Create Token
         access_token = self._create_access_token(data={"sub": self.username})
@@ -92,21 +97,32 @@ class LocalAuth(BaseAuth):
     def _validate_token(self, token: str) -> bool:
         if token is None:
             raise ValueError
+        secret_key = security.get_jwt_secret()
         payload = jwt.decode(
-            token, self.secret_key, algorithms=[self.JWT_ALGORITHM]
+            token, secret_key, algorithms=[self.JWT_ALGORITHM]
         )
         username = payload.get("sub")
         if username is None or username.lower() != self.username:
             raise ValueError
+        token_ver = payload.get("ver")
+        current_ver = security.get_permissions().get("token_version", 1)
+        if token_ver is not None and token_ver != current_ver:
+            raise ValueError("Token revoked")
+        return True
 
     def _create_access_token(self, data: dict):
         to_encode = data.copy()
         expiry_datetime = datetime.utcnow() + timedelta(
             days=self.session_expiry_days
         )
-        to_encode.update({"exp": expiry_datetime})
+        to_encode.update({
+            "exp": expiry_datetime,
+            "role": "admin",
+            "ver": security.get_permissions().get("token_version", 1)
+        })
+        secret_key = security.get_jwt_secret()
         encoded_jwt = jwt.encode(
-            to_encode, self.secret_key, algorithm=self.JWT_ALGORITHM
+            to_encode, secret_key, algorithm=self.JWT_ALGORITHM
         )
         return encoded_jwt
 

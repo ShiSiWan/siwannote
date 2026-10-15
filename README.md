@@ -37,7 +37,7 @@ docker compose up -d --build
 
 启动完成后，打开浏览器访问 **`http://localhost:8080`**  
 * 默认管理员账号：`admin`
-* 默认管理员密码：`admin123`（登录后可在设置中即时修改）
+* 初始密码：由环境变量 `SIWAN_PASSWORD` 设置；若未设置，系统首次启动将自动生成高强度随机密码并在控制台日志中输出（登录后可在设置面板中即时修改并吊销旧会话）。
 
 ---
 
@@ -69,7 +69,8 @@ python3 -m uvicorn main:app --app-dir server --host 0.0.0.0 --port 8090
 | `SIWAN_PATH` | `./data` | 笔记与附件在宿主机上的存储路径 |
 | `SIWAN_AUTH_TYPE` | `none` | 权限模式：`none`（访客只读公开文档 + 管理员登录） / `password` |
 | `SIWAN_USERNAME` | `admin` | 管理员用户名 |
-| `SIWAN_PASSWORD` | `admin123` | 管理员默认密码 |
+| `SIWAN_PASSWORD` | *(动态强密码)* | 管理员密码（未提供时首次启动自动生成并在日志中打印） |
+| `SIWAN_JWT_SECRET` | *(动态256位)* | JWT 签名密钥（未提供时自动生成强密钥并持久化至 `.siwan_jwt_secret`） |
 | `SIWAN_PORT` | `8080` | 生产服务监听端口 |
 
 ---

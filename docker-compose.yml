@@ -11,7 +11,7 @@ services:
       - SIWAN_AUTH_TYPE=none
       - SIWAN_PATH=/www/wwwroot/mymd
       - SIWAN_USERNAME=admin
-      - SIWAN_PASSWORD=admin123
+      # - SIWAN_PASSWORD=your_strong_password_here # 若未设置则首次启动自动生成高强度随机密码并在容器日志中打印
     volumes:
       - ./data:/data
       - /www:/www

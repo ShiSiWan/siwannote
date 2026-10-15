@@ -1,6 +1,8 @@
 import json
 import os
 import shutil
+import time
+import secrets
 from typing import List, Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Request
@@ -25,13 +27,51 @@ def load_server_config() -> dict:
     if os.path.exists(SERVER_CONFIG_FILE):
         try:
             with open(SERVER_CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            backup_path = f"{SERVER_CONFIG_FILE}.corrupted.{int(time.time())}.bak"
+            print(f"[SystemConfig] ⚠️ 配置文件损坏 ({e})，已自动备份至 {backup_path}")
+            try:
+                shutil.copy2(SERVER_CONFIG_FILE, backup_path)
+            except Exception:
+                pass
     return {}
 
 def save_server_config(cfg: dict) -> None:
     atomic_save_json(SERVER_CONFIG_FILE, cfg)
+
+def atomic_copy_file(src: str, dst: str, overwrite: bool = False) -> bool:
+    """Safely and atomically copy file from src to dst to avoid TOCTOU races and partial writes."""
+    if not os.path.exists(src) or not os.path.isfile(src):
+        return False
+    if not overwrite and os.path.exists(dst):
+        return False
+    dst_dir = os.path.dirname(dst)
+    if dst_dir:
+        os.makedirs(dst_dir, exist_ok=True)
+    temp_file = f"{dst}.tmp.{os.getpid()}.{secrets.token_hex(4)}"
+    try:
+        shutil.copy2(src, temp_file)
+        with open(temp_file, "rb") as f:
+            f.flush()
+            os.fsync(f.fileno())
+        if not overwrite and os.path.exists(dst):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+            return False
+        os.replace(temp_file, dst)
+        return True
+    except Exception as e:
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+        raise e
 
 def get_current_storage_path() -> str:
     cfg = load_server_config()
@@ -58,7 +98,7 @@ def get_notes_count_in_dir(path: str) -> int:
     return count
 
 def sync_storage_contents(src_dir: str, dst_dir: str) -> dict:
-    """Copy all markdown files, attachments, and configuration files from src_dir to dst_dir."""
+    """Copy all markdown files, attachments, and configuration files from src_dir to dst_dir atomically."""
     if not os.path.exists(src_dir) or not os.path.isdir(src_dir):
         return {"copied_notes": 0, "copied_attachments": 0}
 
@@ -74,9 +114,7 @@ def sync_storage_contents(src_dir: str, dst_dir: str) -> dict:
             if f.endswith(".md") and not f.startswith("."):
                 rel_path = os.path.relpath(os.path.join(root, f), src_dir)
                 target_file = os.path.join(dst_dir, rel_path)
-                os.makedirs(os.path.dirname(target_file), exist_ok=True)
-                if not os.path.exists(target_file):
-                    shutil.copy2(os.path.join(root, f), target_file)
+                if atomic_copy_file(os.path.join(root, f), target_file, overwrite=False):
                     copied_notes += 1
 
     # 2. Copy attachments
@@ -87,17 +125,17 @@ def sync_storage_contents(src_dir: str, dst_dir: str) -> dict:
         for f in os.listdir(src_att):
             src_f = os.path.join(src_att, f)
             dst_f = os.path.join(dst_att, f)
-            if os.path.isfile(src_f) and not os.path.exists(dst_f):
-                shutil.copy2(src_f, dst_f)
-                copied_attachments += 1
+            if os.path.isfile(src_f):
+                if atomic_copy_file(src_f, dst_f, overwrite=False):
+                    copied_attachments += 1
 
     # 3. Copy permissions / comments / ai_config
     for cfg_name in [".siwan_permissions.json", ".siwan_comments.json", ".siwan_ai_config.json"]:
         src_cfg = os.path.join(src_dir, cfg_name)
         dst_cfg = os.path.join(dst_dir, cfg_name)
-        if os.path.exists(src_cfg) and not os.path.exists(dst_cfg):
+        if os.path.exists(src_cfg):
             try:
-                shutil.copy2(src_cfg, dst_cfg)
+                atomic_copy_file(src_cfg, dst_cfg, overwrite=False)
             except Exception:
                 pass
 

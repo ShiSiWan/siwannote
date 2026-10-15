@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, UploadFile
@@ -24,15 +25,13 @@ custom_storage = system_config.get_current_storage_path()
 if custom_storage and os.path.isdir(custom_storage):
     os.environ["SIWAN_PATH"] = custom_storage
     os.environ["FLATNOTES_PATH"] = custom_storage
-    security.DATA_DIR = custom_storage
-    security.PERM_FILE = os.path.join(custom_storage, ".siwan_permissions.json")
-    security.COMMENTS_FILE = os.path.join(custom_storage, ".siwan_comments.json")
-    security.IP_STATS_FILE = os.path.join(custom_storage, ".siwan_ip_stats.json")
 
 global_config = GlobalConfig()
 global_config.storage_path = custom_storage
 auth: BaseAuth = global_config.load_auth()
-# Dynamic Storage Resolvers
+
+# Dynamic Storage Resolvers with concurrency lock
+_storage_lock = threading.RLock()
 _current_storage_instance: Optional[BaseNotes] = None
 _current_storage_path: Optional[str] = None
 _current_attachment_instance: Optional[BaseAttachments] = None
@@ -41,24 +40,31 @@ _current_attachment_path: Optional[str] = None
 def get_note_storage() -> BaseNotes:
     global _current_storage_instance, _current_storage_path
     active_path = system_config.get_current_storage_path()
-    if _current_storage_instance is None or _current_storage_path != active_path:
-        _current_storage_path = active_path
-        os.environ["SIWAN_PATH"] = active_path
-        os.environ["FLATNOTES_PATH"] = active_path
-        global_config.storage_path = active_path
-        from notes.file_system import FileSystemNotes
-        _current_storage_instance = FileSystemNotes(active_path)
-        _current_storage_instance._sync_index_with_retry(clean=True, optimize=True)
-    return _current_storage_instance
+    with _storage_lock:
+        if _current_storage_instance is None or _current_storage_path != active_path:
+            if _current_storage_instance is not None and hasattr(_current_storage_instance, "close"):
+                try:
+                    _current_storage_instance.close()
+                except Exception:
+                    pass
+            _current_storage_path = active_path
+            os.environ["SIWAN_PATH"] = active_path
+            os.environ["FLATNOTES_PATH"] = active_path
+            global_config.storage_path = active_path
+            from notes.file_system import FileSystemNotes
+            _current_storage_instance = FileSystemNotes(active_path)
+            _current_storage_instance._sync_index_with_retry(clean=True, optimize=True)
+        return _current_storage_instance
 
 def get_attachment_storage() -> BaseAttachments:
     global _current_attachment_instance, _current_attachment_path
     active_path = system_config.get_current_storage_path()
-    if _current_attachment_instance is None or _current_attachment_path != active_path:
-        _current_attachment_path = active_path
-        from attachments.file_system import FileSystemAttachments
-        _current_attachment_instance = FileSystemAttachments(active_path)
-    return _current_attachment_instance
+    with _storage_lock:
+        if _current_attachment_instance is None or _current_attachment_path != active_path:
+            _current_attachment_path = active_path
+            from attachments.file_system import FileSystemAttachments
+            _current_attachment_instance = FileSystemAttachments(active_path)
+        return _current_attachment_instance
 
 class NoteStorageProxy:
     def __getattr__(self, name):
@@ -113,10 +119,15 @@ def root(title: str = ""):
 if global_config.auth_type not in [AuthType.NONE, AuthType.READ_ONLY]:
 
     @router.post("/api/token", response_model=Token)
-    def token(data: Login):
+    def token(data: Login, request: Request):
+        client_ip = security.get_client_ip(request)
+        security.check_login_rate_limit(client_ip)
         try:
-            return auth.login(data)
+            tok = auth.login(data)
+            security.clear_login_failures(client_ip)
+            return tok
         except ValueError:
+            security.record_login_failure(client_ip)
             raise HTTPException(
                 status_code=401, detail=api_messages.login_failed
             )
