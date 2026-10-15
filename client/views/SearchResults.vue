@@ -153,10 +153,12 @@ watch(() => props.sortBy, reSortResults);
 onMounted(() => {
   init();
   window.addEventListener("siwan-storage-changed", init);
+  window.addEventListener("siwan-auth-changed", init);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("siwan-storage-changed", init);
+  window.removeEventListener("siwan-auth-changed", init);
 });
 </script>
 

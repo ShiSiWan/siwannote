@@ -313,7 +313,11 @@ class FileSystemNotes(BaseNotes):
 
     def _path_from_title(self, title: str) -> str:
         clean_title = title.replace("\\", "/").strip("/")
-        return os.path.join(self.storage_path, clean_title + MARKDOWN_EXT)
+        filepath = os.path.realpath(os.path.join(self.storage_path, clean_title + MARKDOWN_EXT))
+        storage_real = os.path.realpath(self.storage_path)
+        if not filepath.startswith(storage_real + os.sep) and filepath != storage_real:
+            raise ValueError(f"Invalid note path outside storage: '{title}'")
+        return filepath
 
     def _get_by_filename(self, filename: str) -> Note:
         """Get a note by its filename."""

@@ -29,6 +29,8 @@ class FileSystemAttachments(BaseAttachments):
 
     def create(self, file: UploadFile) -> AttachmentCreateResponse:
         """Create a new attachment."""
+        clean_name = os.path.basename((file.filename or "").replace("\\", "/"))
+        file.filename = clean_name
         is_valid_filename(file.filename)
         try:
             self._save_file(file)
@@ -42,13 +44,21 @@ class FileSystemAttachments(BaseAttachments):
     def get(self, filename: str) -> FileResponse:
         """Get a specific attachment."""
         is_valid_filename(filename)
-        filepath = os.path.join(self.storage_path, filename)
+        clean_name = os.path.basename(filename.replace("\\", "/"))
+        filepath = os.path.realpath(os.path.join(self.storage_path, clean_name))
+        storage_real = os.path.realpath(self.storage_path)
+        if not filepath.startswith(storage_real + os.sep) and filepath != storage_real:
+            raise PermissionError("Access denied.")
         if not os.path.isfile(filepath):
             raise FileNotFoundError(f"'{filename}' not found.")
         return FileResponse(filepath)
 
     def _save_file(self, file: UploadFile):
-        filepath = os.path.join(self.storage_path, file.filename)
+        clean_name = os.path.basename(file.filename.replace("\\", "/"))
+        filepath = os.path.realpath(os.path.join(self.storage_path, clean_name))
+        storage_real = os.path.realpath(self.storage_path)
+        if not filepath.startswith(storage_real + os.sep) and filepath != storage_real:
+            raise PermissionError("Access denied.")
         with open(filepath, "xb") as f:
             shutil.copyfileobj(file.file, f)
 

@@ -12,8 +12,39 @@ from jose import jwt, JWTError
 security_router = APIRouter(prefix="/api/security", tags=["security"])
 bearer_scheme = HTTPBearer(auto_error=False)
 
-JWT_SECRET = os.environ.get("SIWAN_JWT_SECRET", os.environ.get("FLATNOTES_SECRET_KEY", "siwan-secret-key-super-secure-2026"))
+try:
+    from helpers import atomic_save_json
+except ImportError:
+    from server.helpers import atomic_save_json
+
 JWT_ALGORITHM = "HS256"
+
+def get_jwt_secret() -> str:
+    """Retrieve or dynamically generate a strong persistent 256-bit JWT secret."""
+    env_secret = os.environ.get("SIWAN_JWT_SECRET") or os.environ.get("FLATNOTES_SECRET_KEY")
+    if env_secret and env_secret.strip():
+        return env_secret.strip()
+    secret_file = os.path.join(get_data_dir(), ".siwan_jwt_secret")
+    if os.path.exists(secret_file):
+        try:
+            with open(secret_file, "r", encoding="utf-8") as f:
+                s = f.read().strip()
+                if len(s) >= 32:
+                    return s
+        except Exception:
+            pass
+    new_secret = secrets.token_hex(32)
+    try:
+        os.makedirs(os.path.dirname(secret_file), exist_ok=True)
+        with open(secret_file, "w", encoding="utf-8") as f:
+            f.write(new_secret)
+        try:
+            os.chmod(secret_file, 0o600)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[Security] Warning: Could not persist JWT secret: {e}")
+    return new_secret
 
 def get_data_dir() -> str:
     try:
@@ -86,9 +117,7 @@ def load_json(filepath: str, default: Any) -> Any:
     return default
 
 def save_json(filepath: str, data: Any) -> None:
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_save_json(filepath, data)
 
 def get_permissions() -> Dict[str, Any]:
     default = {
@@ -203,15 +232,30 @@ def save_note_annotations(title: str, annotations: List[Dict[str, Any]]) -> None
     except Exception:
         pass
 
+_CACHED_IP_DATA: Optional[Dict[str, Any]] = None
+_LAST_IP_DISK_SAVE: float = 0.0
+_IP_SAVE_INTERVAL: float = 30.0  # seconds
+
 def get_ip_data() -> Dict[str, Any]:
+    global _CACHED_IP_DATA
+    if _CACHED_IP_DATA is not None:
+        return _CACHED_IP_DATA
     default = {
         "stats": {},
         "blacklist": []
     }
-    return load_json(get_ip_stats_file(), default)
+    _CACHED_IP_DATA = load_json(get_ip_stats_file(), default)
+    if not isinstance(_CACHED_IP_DATA, dict):
+        _CACHED_IP_DATA = default
+    return _CACHED_IP_DATA
 
-def save_ip_data(data: Dict[str, Any]) -> None:
-    save_json(get_ip_stats_file(), data)
+def save_ip_data(data: Dict[str, Any], force: bool = False) -> None:
+    global _CACHED_IP_DATA, _LAST_IP_DISK_SAVE
+    _CACHED_IP_DATA = data
+    now = time.time()
+    if force or (now - _LAST_IP_DISK_SAVE >= _IP_SAVE_INTERVAL):
+        save_json(get_ip_stats_file(), data)
+        _LAST_IP_DISK_SAVE = now
 
 # --- Admin Auth Helpers ---
 def create_access_token(username: str, remember_me: bool = True) -> str:
@@ -225,7 +269,7 @@ def create_access_token(username: str, remember_me: bool = True) -> str:
         "ver": token_ver,
         "exp": expire
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 def is_admin_token(token: Optional[str]) -> bool:
     if not token or not isinstance(token, str):
@@ -234,7 +278,7 @@ def is_admin_token(token: Optional[str]) -> bool:
     if not clean_token:
         return False
     try:
-        payload = jwt.decode(clean_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(clean_token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         if payload.get("role") != "admin":
             return False
         perms = get_permissions()
@@ -260,6 +304,32 @@ def get_client_ip(request: Request) -> str:
         return real_ip.strip()
     return request.client.host if request.client else "127.0.0.1"
 
+# --- Login Rate Limiting (Brute-Force Protection) ---
+_FAILED_LOGINS: Dict[str, List[float]] = {}
+_LOGIN_LOCKOUT_SECONDS = 600  # 10 minutes
+_MAX_FAILED_ATTEMPTS = 5
+
+def check_login_rate_limit(ip: str) -> None:
+    now = time.time()
+    attempts = _FAILED_LOGINS.get(ip, [])
+    attempts = [t for t in attempts if now - t < _LOGIN_LOCKOUT_SECONDS]
+    _FAILED_LOGINS[ip] = attempts
+    if len(attempts) >= _MAX_FAILED_ATTEMPTS:
+        wait_seconds = int(_LOGIN_LOCKOUT_SECONDS - (now - attempts[0]))
+        wait_mins = max(1, wait_seconds // 60)
+        raise HTTPException(
+            status_code=429,
+            detail=f"密码错误次数过多，该 IP 已被临时锁定。请在 {wait_mins} 分钟后再试。"
+        )
+
+def record_login_failure(ip: str) -> None:
+    now = time.time()
+    attempts = _FAILED_LOGINS.setdefault(ip, [])
+    attempts.append(now)
+
+def clear_login_failures(ip: str) -> None:
+    _FAILED_LOGINS.pop(ip, None)
+
 # --- Middleware Helper for IP Tracking & Blacklist ---
 def check_ip_and_track(request: Request) -> None:
     ip = get_client_ip(request)
@@ -273,7 +343,8 @@ def check_ip_and_track(request: Request) -> None:
     path = request.url.path
     if not path.startswith("/assets") and not path.endswith((".js", ".css", ".png", ".ico", ".ttf", ".woff", ".woff2")):
         stats = ip_data.setdefault("stats", {})
-        if ip not in stats:
+        is_new_ip = ip not in stats
+        if is_new_ip:
             stats[ip] = {
                 "ip": ip,
                 "visits": 1,
@@ -286,16 +357,20 @@ def check_ip_and_track(request: Request) -> None:
             stats[ip]["visits"] = stats[ip].get("visits", 0) + 1
             stats[ip]["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             stats[ip]["last_path"] = path
-        save_ip_data(ip_data)
+        save_ip_data(ip_data, force=is_new_ip)
 
 # --- Endpoints ---
 
 @security_router.post("/login")
-def admin_login(req: AdminLoginRequest):
+def admin_login(req: AdminLoginRequest, request: Request):
+    client_ip = get_client_ip(request)
+    check_login_rate_limit(client_ip)
+
     perms = get_permissions()
     expected_password = perms.get("admin_password", ADMIN_PASSWORD)
     
     if req.username.strip().lower() == ADMIN_USERNAME.lower() and req.password == expected_password:
+        clear_login_failures(client_ip)
         token = create_access_token(req.username, remember_me=req.remember_me)
         return {
             "status": "success",
@@ -305,6 +380,7 @@ def admin_login(req: AdminLoginRequest):
             "role": "admin",
             "message": "管理员登录成功"
         }
+    record_login_failure(client_ip)
     raise HTTPException(status_code=401, detail="管理员账号或密码错误，请核实后重试")
 
 @security_router.post("/change-password")
@@ -665,5 +741,158 @@ def manage_blacklist(req: BlacklistRequest, request: Request, _: bool = Depends(
         raise HTTPException(status_code=400, detail="无效的操作类型")
 
     ip_data["blacklist"] = list(blacklist)
-    save_ip_data(ip_data)
+    save_ip_data(ip_data, force=True)
     return {"status": "success", "message": msg, "blacklist": ip_data["blacklist"]}
+
+
+# --- Note Lifecycle Synchronization Handlers ---
+
+def handle_note_renamed(old_title: str, new_title: str) -> None:
+    """Synchronize annotations, summaries, and permissions when a note is renamed."""
+    # 1. Update public_notes in permissions
+    try:
+        perms = get_permissions()
+        pub_list = perms.get("public_notes")
+        if pub_list is not None and old_title in pub_list:
+            pub_list.remove(old_title)
+            if new_title not in pub_list:
+                pub_list.append(new_title)
+            perms["public_notes"] = pub_list
+            save_permissions(perms)
+    except Exception as e:
+        print(f"[Security] Rename permission update error: {e}")
+
+    # 2. Rename per-note comments file
+    try:
+        old_per_note, _ = get_note_comments_paths(old_title)
+        new_per_note, _ = get_note_comments_paths(new_title)
+        if os.path.exists(old_per_note):
+            os.makedirs(os.path.dirname(new_per_note), exist_ok=True)
+            os.replace(old_per_note, new_per_note)
+    except Exception as e:
+        print(f"[Security] Rename comments file error: {e}")
+
+    # 3. Rename per-note summary file
+    try:
+        old_summary = get_note_summary_path(old_title)
+        new_summary = get_note_summary_path(new_title)
+        if os.path.exists(old_summary):
+            os.makedirs(os.path.dirname(new_summary), exist_ok=True)
+            summary_data = load_json(old_summary, {})
+            if isinstance(summary_data, dict):
+                summary_data["title"] = new_title
+                save_json(new_summary, summary_data)
+                try:
+                    os.remove(old_summary)
+                except Exception:
+                    pass
+            else:
+                os.replace(old_summary, new_summary)
+    except Exception as e:
+        print(f"[Security] Rename summary file error: {e}")
+
+    # 4. Update directory-level .comments.json
+    try:
+        _, old_dir_comments = get_note_comments_paths(old_title)
+        _, new_dir_comments = get_note_comments_paths(new_title)
+        old_base = os.path.splitext(os.path.basename(old_title))[0]
+        new_base = os.path.splitext(os.path.basename(new_title))[0]
+
+        if os.path.exists(old_dir_comments):
+            old_dir_data = load_json(old_dir_comments, {})
+            anns = old_dir_data.pop(old_title, None) or old_dir_data.pop(old_base, None)
+            if anns:
+                save_json(old_dir_comments, old_dir_data)
+                if old_dir_comments == new_dir_comments:
+                    old_dir_data[new_title] = anns
+                    old_dir_data[new_base] = anns
+                    save_json(old_dir_comments, old_dir_data)
+                else:
+                    new_dir_data = load_json(new_dir_comments, {}) if os.path.exists(new_dir_comments) else {}
+                    new_dir_data[new_title] = anns
+                    new_dir_data[new_base] = anns
+                    save_json(new_dir_comments, new_dir_data)
+    except Exception as e:
+        print(f"[Security] Rename dir comments error: {e}")
+
+    # 5. Global legacy comments and annotations
+    try:
+        comments_data = get_comments_data()
+        if old_title in comments_data:
+            comments_data[new_title] = comments_data.pop(old_title)
+            save_comments_data(comments_data)
+    except Exception as e:
+        print(f"[Security] Rename global comments error: {e}")
+
+    try:
+        ann_data = get_annotations_data()
+        if old_title in ann_data:
+            ann_data[new_title] = ann_data.pop(old_title)
+            save_annotations_data(ann_data)
+    except Exception as e:
+        print(f"[Security] Rename global annotations error: {e}")
+
+
+def handle_note_deleted(title: str) -> None:
+    """Clean up comments, summaries, and permissions when a note is deleted."""
+    # 1. Update public_notes in permissions
+    try:
+        perms = get_permissions()
+        pub_list = perms.get("public_notes")
+        if pub_list is not None and title in pub_list:
+            pub_list.remove(title)
+            perms["public_notes"] = pub_list
+            save_permissions(perms)
+    except Exception as e:
+        print(f"[Security] Delete permission update error: {e}")
+
+    # 2. Delete per-note comments file
+    try:
+        per_note, _ = get_note_comments_paths(title)
+        if os.path.exists(per_note):
+            os.remove(per_note)
+    except Exception as e:
+        print(f"[Security] Delete comments file error: {e}")
+
+    # 3. Delete per-note summary file
+    try:
+        summary_file = get_note_summary_path(title)
+        if os.path.exists(summary_file):
+            os.remove(summary_file)
+    except Exception as e:
+        print(f"[Security] Delete summary file error: {e}")
+
+    # 4. Clean directory-level .comments.json
+    try:
+        _, dir_comments = get_note_comments_paths(title)
+        if os.path.exists(dir_comments):
+            dir_data = load_json(dir_comments, {})
+            base_name = os.path.splitext(os.path.basename(title))[0]
+            changed = False
+            if title in dir_data:
+                del dir_data[title]
+                changed = True
+            if base_name in dir_data:
+                del dir_data[base_name]
+                changed = True
+            if changed:
+                save_json(dir_comments, dir_data)
+    except Exception as e:
+        print(f"[Security] Delete dir comments error: {e}")
+
+    # 5. Clean global legacy comments and annotations
+    try:
+        comments_data = get_comments_data()
+        if title in comments_data:
+            del comments_data[title]
+            save_comments_data(comments_data)
+    except Exception as e:
+        print(f"[Security] Delete global comments error: {e}")
+
+    try:
+        ann_data = get_annotations_data()
+        if title in ann_data:
+            del ann_data[title]
+            save_annotations_data(ann_data)
+    except Exception as e:
+        print(f"[Security] Delete global annotations error: {e}")

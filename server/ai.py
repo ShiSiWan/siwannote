@@ -15,6 +15,11 @@ except ImportError:
     from server import security
     verify_admin = security.verify_admin
 
+try:
+    from helpers import atomic_save_json
+except ImportError:
+    from server.helpers import atomic_save_json
+
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 
 DEFAULT_SUMMARY_TEMPLATE = (
@@ -71,9 +76,7 @@ def load_ai_config() -> AiConfig:
 
 def save_ai_config(config: AiConfig) -> None:
     cfg_file = get_ai_config_file()
-    os.makedirs(os.path.dirname(cfg_file), exist_ok=True)
-    with open(cfg_file, "w", encoding="utf-8") as f:
-        json.dump(config.dict(), f, ensure_ascii=False, indent=2)
+    atomic_save_json(cfg_file, config.dict())
 
 def get_http_client(cfg: AiConfig, timeout: float = 60.0) -> httpx.AsyncClient:
     proxy = (cfg.proxy_url or "").strip()

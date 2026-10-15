@@ -10,6 +10,11 @@ try:
 except ImportError:
     from server import security
 
+try:
+    from helpers import atomic_save_json
+except ImportError:
+    from server.helpers import atomic_save_json
+
 system_router = APIRouter(prefix="/api/system", tags=["system"])
 
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,9 +31,7 @@ def load_server_config() -> dict:
     return {}
 
 def save_server_config(cfg: dict) -> None:
-    os.makedirs(APP_ROOT, exist_ok=True)
-    with open(SERVER_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    atomic_save_json(SERVER_CONFIG_FILE, cfg)
 
 def get_current_storage_path() -> str:
     cfg = load_server_config()

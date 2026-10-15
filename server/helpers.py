@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import secrets
 import sys
 
 from pydantic import BaseModel
@@ -15,21 +17,47 @@ def camel_case(snake_case_str: str) -> str:
 
 def is_valid_filename(value):
     """Validate note title / path. Allows subdirectory paths while preventing traversal and invalid chars."""
-    if ".." in value:
-        raise ValueError("title cannot contain '..'")
+    if not value or not isinstance(value, str):
+        raise ValueError("title/filename cannot be empty")
+    clean = value.strip()
+    if clean.startswith("/") or clean.startswith("\\"):
+        raise ValueError("title/filename cannot start with '/' or '\\'")
+    if ".." in clean:
+        raise ValueError("title/filename cannot contain '..'")
     invalid_chars = r'<>:"|?*'
-    if any(invalid_char in value for invalid_char in invalid_chars):
+    if any(invalid_char in clean for invalid_char in invalid_chars):
         raise ValueError(
-            "title cannot include any of the following characters: "
+            "title/filename cannot include any of the following characters: "
             + invalid_chars
         )
-    return value
+    return clean
 
 
 def strip_whitespace(value):
     """Return the declared string with leading and trailing whitespace
     removed."""
     return value.strip()
+
+
+def atomic_save_json(filepath: str, data) -> None:
+    """Atomically write JSON data to file to prevent corruption on crash or concurrency."""
+    dir_name = os.path.dirname(filepath)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+    temp_file = f"{filepath}.tmp.{os.getpid()}.{secrets.token_hex(4)}"
+    try:
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, filepath)
+    except Exception as e:
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+        raise e
 
 
 def get_env(

@@ -200,13 +200,7 @@ def patch_note(title: str, data: NoteUpdate, request: Request):
     try:
         updated = get_note_storage().update(title, data)
         if data.new_title and data.new_title != title:
-            perms = security.get_permissions()
-            pub_list = perms.get("public_notes")
-            if pub_list is not None and title in pub_list:
-                pub_list.remove(title)
-                pub_list.append(data.new_title)
-                perms["public_notes"] = pub_list
-                security.save_permissions(perms)
+            security.handle_note_renamed(title, data.new_title)
         return updated
     except ValueError:
         raise HTTPException(
@@ -234,12 +228,7 @@ def delete_note(title: str, request: Request):
 
     try:
         get_note_storage().delete(title)
-        perms = security.get_permissions()
-        pub_list = perms.get("public_notes")
-        if pub_list is not None and title in pub_list:
-            pub_list.remove(title)
-            perms["public_notes"] = pub_list
-            security.save_permissions(perms)
+        security.handle_note_deleted(title)
     except ValueError:
         raise HTTPException(
             status_code=400,
