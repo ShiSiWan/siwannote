@@ -32,8 +32,11 @@ export function loadStoredToken() {
 export function clearStoredToken() {
   sessionStorage.removeItem(tokenStorageKey);
   localStorage.removeItem(tokenStorageKey);
-  document.cookie =
-    getCookieString() + "; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+  try {
+    const basePath = getBasePath() || "/";
+    document.cookie = `${tokenStorageKey}=; Path=${basePath}; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Strict`;
+    document.cookie = `${tokenStorageKey}=; Path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Strict`;
+  } catch {}
 }
 
 export function isCurrentTokenStored() {

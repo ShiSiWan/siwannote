@@ -20,7 +20,11 @@ def get_data_dir() -> str:
         from system_config import get_current_storage_path
         return get_current_storage_path()
     except Exception:
-        return os.environ.get("SIWAN_PATH", os.environ.get("FLATNOTES_PATH", "/data"))
+        try:
+            from server.system_config import get_current_storage_path
+            return get_current_storage_path()
+        except Exception:
+            return os.environ.get("SIWAN_PATH", os.environ.get("FLATNOTES_PATH", "/data"))
 
 def get_permissions_file() -> str:
     return os.path.join(get_data_dir(), ".siwan_permissions.json")
@@ -89,10 +93,18 @@ def save_json(filepath: str, data: Any) -> None:
 def get_permissions() -> Dict[str, Any]:
     default = {
         "public_notes": [],
-        "all_public": True,
-        "admin_password": ADMIN_PASSWORD
+        "all_public": False,
+        "admin_password": ADMIN_PASSWORD,
+        "token_version": 1
     }
-    return load_json(get_permissions_file(), default)
+    data = load_json(get_permissions_file(), default)
+    if not isinstance(data, dict):
+        data = default
+    if "token_version" not in data:
+        data["token_version"] = 1
+    if "all_public" not in data:
+        data["all_public"] = False
+    return data
 
 def save_permissions(data: Dict[str, Any]) -> None:
     save_json(get_permissions_file(), data)
@@ -203,27 +215,37 @@ def save_ip_data(data: Dict[str, Any]) -> None:
 
 # --- Admin Auth Helpers ---
 def create_access_token(username: str, remember_me: bool = True) -> str:
+    perms = get_permissions()
+    token_ver = perms.get("token_version", 1)
     expires_delta = timedelta(days=30 if remember_me else 1)
     expire = datetime.utcnow() + expires_delta
-    payload = {"sub": username, "role": "admin", "exp": expire}
+    payload = {
+        "sub": username,
+        "role": "admin",
+        "ver": token_ver,
+        "exp": expire
+    }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 def is_admin_token(token: Optional[str]) -> bool:
-    auth_type = os.environ.get("SIWAN_AUTH_TYPE", os.environ.get("FLATNOTES_AUTH_TYPE", "")).lower()
-    if auth_type == "none":
-        return True
-    if not token:
+    if not token or not isinstance(token, str):
+        return False
+    clean_token = token.replace("Bearer ", "").strip()
+    if not clean_token:
         return False
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload.get("role") == "admin"
+        payload = jwt.decode(clean_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("role") != "admin":
+            return False
+        perms = get_permissions()
+        current_ver = perms.get("token_version", 1)
+        if payload.get("ver") != current_ver:
+            return False
+        return True
     except JWTError:
         return False
 
 def verify_admin(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> bool:
-    auth_type = os.environ.get("SIWAN_AUTH_TYPE", os.environ.get("FLATNOTES_AUTH_TYPE", "")).lower()
-    if auth_type == "none":
-        return True
     if not credentials or not is_admin_token(credentials.credentials):
         raise HTTPException(status_code=401, detail="需要管理员权限，请先登录管理员账号。")
     return True
@@ -301,8 +323,19 @@ def change_password(req: ChangePasswordRequest, request: Request):
         raise HTTPException(status_code=400, detail="新密码长度不能少于 4 位字符。")
     
     perms["admin_password"] = new_pwd
+    # Bump token_version to immediately revoke all existing tokens on all other devices/browsers
+    new_ver = int(time.time())
+    perms["token_version"] = new_ver
     save_permissions(perms)
-    return {"status": "success", "message": "管理员密码修改成功，后续登录请使用新密码。"}
+
+    # Issue a fresh token with the new version for the current admin
+    new_token = create_access_token(ADMIN_USERNAME, remember_me=True)
+    return {
+        "status": "success",
+        "message": "管理员密码修改成功，其他已登录设备与会话已全部失效，后续登录请使用新密码。",
+        "token": new_token,
+        "access_token": new_token
+    }
 
 @security_router.get("/status")
 def get_user_status(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)):
@@ -319,18 +352,10 @@ def get_public_notes(credentials: Optional[HTTPAuthorizationCredentials] = Depen
     is_admin = is_admin_token(credentials.credentials) if credentials else False
     stored = perms.get("public_notes")
     if stored is None:
-        try:
-            import sys
-            mod = sys.modules.get("main")
-            if mod and hasattr(mod, "get_note_storage"):
-                notes = mod.get_note_storage().search("*")
-                stored = [n.title for n in notes]
-            else:
-                stored = []
-        except Exception:
-            stored = []
+        stored = []
     return {
         "public_notes": stored,
+        "all_public": perms.get("all_public", False),
         "is_admin": is_admin
     }
 
@@ -338,11 +363,16 @@ def get_public_notes(credentials: Optional[HTTPAuthorizationCredentials] = Depen
 def set_public_notes(req: PublicNotesRequest, _: bool = Depends(verify_admin)):
     perms = get_permissions()
     perms["public_notes"] = req.public_notes
+    if req.all_public is not None:
+        perms["all_public"] = bool(req.all_public)
+    else:
+        perms["all_public"] = False
     save_permissions(perms)
     return {
         "status": "success",
         "message": f"已成功更新对外文档设置（共开放 {len(req.public_notes)} 篇）",
-        "public_notes": req.public_notes
+        "public_notes": req.public_notes,
+        "all_public": perms["all_public"]
     }
 
 import re
@@ -439,15 +469,29 @@ def validate_comment_content(content: str) -> None:
         raise HTTPException(status_code=400, detail="留言内容包含违规、敏感或辱骂词汇，请文明交流")
 
 # --- Comments API ---
-@security_router.get("/comments/{title}")
-def get_comments(title: str):
+@security_router.get("/comments/{title:path}")
+def get_comments(title: str, request: Request):
+    auth_header = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    is_admin = is_admin_token(auth_header)
+    if not is_admin:
+        perms = get_permissions()
+        if not perms.get("all_public", False):
+            public_list = perms.get("public_notes", [])
+            if title not in public_list:
+                raise HTTPException(status_code=403, detail="无权限查看此私密文档的留言。")
     comments_data = get_comments_data()
     return {"status": "success", "comments": comments_data.get(title, [])}
 
-@security_router.post("/comments/{title}")
+@security_router.post("/comments/{title:path}")
 def add_comment(title: str, req: CommentCreateRequest, request: Request):
     auth_header = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     is_admin = is_admin_token(auth_header)
+    if not is_admin:
+        perms = get_permissions()
+        if not perms.get("all_public", False):
+            public_list = perms.get("public_notes", [])
+            if title not in public_list:
+                raise HTTPException(status_code=403, detail="无权限在此私密文档下发表留言。")
 
     author = req.author.strip() if req.author else ""
     validate_nickname(author, is_admin=is_admin)
@@ -472,7 +516,7 @@ def add_comment(title: str, req: CommentCreateRequest, request: Request):
 
     return {"status": "success", "comments": note_comments, "comment": new_comment}
 
-@security_router.delete("/comments/{title}/{comment_id}")
+@security_router.delete("/comments/{title:path}/{comment_id}")
 def delete_comment(title: str, comment_id: str, _: bool = Depends(verify_admin)):
     comments_data = get_comments_data()
     note_comments = comments_data.get(title, [])

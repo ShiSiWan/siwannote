@@ -9,7 +9,7 @@ services:
       - PUID=0
       - PGID=0
       - SIWAN_AUTH_TYPE=none
-      - SIWAN_PATH=/data
+      - SIWAN_PATH=/www/wwwroot/mymd
       - SIWAN_USERNAME=admin
       - SIWAN_PASSWORD=admin123
     volumes:
@@ -17,3 +17,4 @@ services:
       - /www:/www
       - /home:/home
       - /root:/root
+      - ./.siwan_server_config.json:/app/.siwan_server_config.json

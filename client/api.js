@@ -3,7 +3,7 @@ import * as constants from "./constants.js";
 import { Note, SearchResult } from "./classes.js";
 
 import axios from "axios";
-import { getStoredToken } from "./tokenStorage.js";
+import { getStoredToken, clearStoredToken } from "./tokenStorage.js";
 import { getToastOptions } from "./helpers.js";
 import router from "./router.js";
 
@@ -21,6 +21,24 @@ api.interceptors.request.use(
     return config;
   },
   function (error) {
+    return Promise.reject(error);
+  },
+);
+
+api.interceptors.response.use(
+  function (response) {
+    return response;
+  },
+  function (error) {
+    if (error.response?.status === 401) {
+      if (getStoredToken()) {
+        clearStoredToken();
+        if (localStorage.getItem("siwan_visitor_nickname") === "管理员 (Admin)") {
+          localStorage.removeItem("siwan_visitor_nickname");
+        }
+        window.dispatchEvent(new CustomEvent("siwan-auth-changed"));
+      }
+    }
     return Promise.reject(error);
   },
 );
@@ -253,8 +271,22 @@ export async function loginAdmin(username, password, rememberMe = false) {
 export async function getSecurityStatus() {
   try {
     const response = await api.get("api/security/status");
+    if (!response.data?.is_admin && getStoredToken()) {
+      clearStoredToken();
+      if (localStorage.getItem("siwan_visitor_nickname") === "管理员 (Admin)") {
+        localStorage.removeItem("siwan_visitor_nickname");
+      }
+      window.dispatchEvent(new CustomEvent("siwan-auth-changed"));
+    }
     return response.data;
   } catch (response) {
+    if (getStoredToken()) {
+      clearStoredToken();
+      if (localStorage.getItem("siwan_visitor_nickname") === "管理员 (Admin)") {
+        localStorage.removeItem("siwan_visitor_nickname");
+      }
+      window.dispatchEvent(new CustomEvent("siwan-auth-changed"));
+    }
     return Promise.reject(response);
   }
 }

@@ -143,7 +143,7 @@ def get_note(title: str, request: Request):
     is_admin = security.is_admin_token(auth_header)
     if not is_admin:
         perms = security.get_permissions()
-        if not perms.get("all_public", True):
+        if not perms.get("all_public", False):
             public_list = perms.get("public_notes", [])
             if title not in public_list:
                 raise HTTPException(
@@ -174,12 +174,7 @@ def post_note(note: NoteCreate, request: Request):
         raise HTTPException(status_code=403, detail="访客模式无权限创建笔记，请登录管理员账号。")
 
     try:
-        created = get_note_storage().create(note)
-        perms = security.get_permissions()
-        if perms.get("public_notes") is not None and note.title not in perms["public_notes"]:
-            perms["public_notes"].append(note.title)
-            security.save_permissions(perms)
-        return created
+        return get_note_storage().create(note)
     except ValueError:
         raise HTTPException(
             status_code=400,
@@ -273,18 +268,20 @@ def search(
     """Perform a full text search on notes."""
     if sort == "lastModified":
         sort = "last_modified"
-    results = get_note_storage().search(term, sort=sort, order=order, limit=limit)
-
     auth_header = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     is_admin = security.is_admin_token(auth_header)
     if not is_admin:
         perms = security.get_permissions()
-        if not perms.get("all_public", True):
+        if not perms.get("all_public", False):
             public_list = perms.get("public_notes", [])
             public_set = set(public_list)
+            results = get_note_storage().search(term, sort=sort, order=order, limit=None)
             results = [r for r in results if r.title in public_set]
+            if limit is not None:
+                results = results[:limit]
+            return results
 
-    return results
+    return get_note_storage().search(term, sort=sort, order=order, limit=limit)
 
 
 @router.get(
@@ -292,8 +289,21 @@ def search(
     dependencies=auth_deps,
     response_model=List[str],
 )
-def get_tags():
-    return get_note_storage().get_tags()
+def get_tags(request: Request):
+    auth_header = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    is_admin = security.is_admin_token(auth_header)
+    if is_admin:
+        return get_note_storage().get_tags()
+    perms = security.get_permissions()
+    if perms.get("all_public", False):
+        return get_note_storage().get_tags()
+    public_list = set(perms.get("public_notes", []))
+    all_notes = get_note_storage().search("*")
+    tags = set()
+    for n in all_notes:
+        if n.title in public_list and hasattr(n, "tags") and n.tags:
+            tags.update(n.tags)
+    return sorted(list(tags))
 
 
 # endregion
@@ -338,7 +348,10 @@ def get_attachment(filename: str):
     dependencies=auth_deps,
     response_model=AttachmentCreateResponse,
 )
-def post_attachment(file: UploadFile):
+def post_attachment(file: UploadFile, request: Request):
+    auth_header = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not security.is_admin_token(auth_header):
+        raise HTTPException(status_code=403, detail="访客模式无权限上传附件，请登录管理员账号。")
     try:
         return get_attachment_storage().create(file)
     except ValueError:

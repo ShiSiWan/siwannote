@@ -164,7 +164,7 @@
           :title="showAnchoredAnnotations ? '收起批注' : '展开右侧页边距批注'"
         >
           <KeylineIcon name="message-square" size="13" strokeWidth="2.2" />
-          <span>{{ showAnchoredAnnotations ? '批注' + (annotations.length ? ` (${annotations.length})` : '') : '批注' }}</span>
+          <span>{{ showAnchoredAnnotations ? '收起批注' + (annotations.length ? ` (${annotations.length})` : '') : '批注' + (annotations.length ? ` (${annotations.length})` : '') }}</span>
         </button>
       </div>
     </div>
@@ -493,9 +493,7 @@ const canModify = computed(
 const articleWrapperRef = ref();
 const anchoredAnnotationsRef = ref();
 const activeAnnotationId = ref("");
-const showAnchoredAnnotations = ref(
-  localStorage.getItem("siwan_show_annotations") !== "0"
-);
+const showAnchoredAnnotations = ref(false);
 
 // Comments state
 const comments = ref([]);
@@ -525,9 +523,28 @@ async function checkAdminStatus() {
     isAdmin.value = res.is_admin === true;
     if (isAdmin.value && !localStorage.getItem("siwan_visitor_nickname")) {
       visitorNickname.value = "管理员 (Admin)";
+    } else if (!isAdmin.value) {
+      if (visitorNickname.value === "管理员 (Admin)") {
+        visitorNickname.value = "";
+      }
+      if (localStorage.getItem("siwan_visitor_nickname") === "管理员 (Admin)") {
+        localStorage.removeItem("siwan_visitor_nickname");
+      }
+      annotations.value = [];
+      showAnchoredAnnotations.value = false;
+      applyAnnotationHighlights();
     }
   } catch {
     isAdmin.value = false;
+    if (visitorNickname.value === "管理员 (Admin)") {
+      visitorNickname.value = "";
+    }
+    if (localStorage.getItem("siwan_visitor_nickname") === "管理员 (Admin)") {
+      localStorage.removeItem("siwan_visitor_nickname");
+    }
+    annotations.value = [];
+    showAnchoredAnnotations.value = false;
+    applyAnnotationHighlights();
   }
 }
 
@@ -596,7 +613,7 @@ function formatCommentDate(isoStr) {
 
 // -------------------- Annotations (书签批注) --------------------
 async function loadAnnotations(title) {
-  if (!title) {
+  if (!title || !isAdmin.value) {
     annotations.value = [];
     return;
   }
@@ -608,7 +625,8 @@ async function loadAnnotations(title) {
       anchoredAnnotationsRef.value?.recalculatePositions();
     });
   } catch (err) {
-    if (err?.response?.status !== 403) {
+    annotations.value = [];
+    if (err?.response?.status !== 403 && err?.response?.status !== 401) {
       console.warn("Failed to load annotations:", err);
     }
   }
@@ -616,11 +634,10 @@ async function loadAnnotations(title) {
 
 function toggleAnnotationMode() {
   showAnchoredAnnotations.value = !showAnchoredAnnotations.value;
-  localStorage.setItem("siwan_show_annotations", showAnchoredAnnotations.value ? "1" : "0");
-  annotationAction.value = { visible: false, x: 0, y: 0, quote: "" };
+  annotationAction.value = { visible: false, x: 0, y: 0, quote: "", comment: "", annId: "" };
   if (showAnchoredAnnotations.value) {
     toast.add(
-      getToastOptions("批注已开启，选中正文文字即可添加新批注", "批注模式", "info"),
+      getToastOptions("批注已展开，选中正文文字即可添加新批注", "批注模式", "info"),
     );
     nextTick(() => {
       applyAnnotationHighlights();
@@ -651,7 +668,7 @@ function onHoverAnnotation(annId) {
 }
 
 function onViewerMouseUp(event) {
-  if (isCreationMode.value || !canModify.value) return;
+  if (isCreationMode.value || !canModify.value || !showAnchoredAnnotations.value) return;
   const viewerEl = toastViewer.value?.$el;
   if (!viewerEl) return;
   if (!viewerEl.contains(event.target)) return;
@@ -964,6 +981,10 @@ function handleExternalScanCompleted(e) {
 
 function init() {
   checkAdminStatus();
+  showAnchoredAnnotations.value = false;
+  annotationAction.value = { visible: false, x: 0, y: 0, quote: "", comment: "", annId: "" };
+  annotationComposer.value = { visible: false, quote: "", comment: "" };
+
   // Return if we already have the note e.g. When we rename a note, the route prop would change but we’d already have the note.
   if (props.title && props.title == note.value.title) {
     loadComments(props.title);

@@ -1526,6 +1526,9 @@ async function handleChangePassword() {
   isChangingPassword.value = true;
   try {
     const res = await changeAdminPassword(oldPassword, newPassword);
+    if (res.token || res.access_token) {
+      storeToken(res.token || res.access_token, true);
+    }
     toast.add({
       severity: "success",
       summary: "密码修改成功",

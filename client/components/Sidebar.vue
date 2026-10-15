@@ -289,11 +289,15 @@ const activeHeadingId = ref("");
 const isAdmin = ref(false);
 
 async function checkAdmin() {
+  const prevAdmin = isAdmin.value;
   try {
     const res = await getSecurityStatus();
     isAdmin.value = res.is_admin === true;
   } catch {
     isAdmin.value = false;
+  }
+  if (prevAdmin !== isAdmin.value) {
+    loadNotes();
   }
 }
 
@@ -326,14 +330,16 @@ function triggerNewNote() {
 }
 
 function onAuthChanged() {
-  loadNotes();
-  checkAdmin();
+  checkAdmin().finally(() => {
+    loadNotes();
+  });
 }
 
 onMounted(() => {
   window.addEventListener("resize", handleWindowResize);
-  loadNotes();
-  checkAdmin();
+  checkAdmin().finally(() => {
+    loadNotes();
+  });
 
   window.addEventListener("siwan-headings-updated", extractHeadings);
   window.addEventListener("siwan-auth-changed", onAuthChanged);

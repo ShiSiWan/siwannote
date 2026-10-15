@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 try:
     import security
     verify_admin = security.verify_admin
@@ -151,7 +151,7 @@ def update_config(data: Dict[str, Any]):
     save_ai_config(cfg)
     return {"status": "success", "message": "AI configuration saved successfully"}
 
-@router.get("/raw-json")
+@router.get("/raw-json", dependencies=[Depends(verify_admin)])
 def get_raw_json():
     cfg = load_ai_config()
     data = cfg.dict()
@@ -164,7 +164,7 @@ def get_raw_json():
         "has_key": bool(cfg.api_key.strip())
     }
 
-@router.post("/raw-json")
+@router.post("/raw-json", dependencies=[Depends(verify_admin)])
 def update_raw_json(payload: Dict[str, Any]):
     json_str = payload.get("json_str", "")
     try:
@@ -192,7 +192,7 @@ def extract_reply(result: dict) -> str:
         content = msg.get("reasoning_content") or ""
     return str(content).strip()
 
-@router.post("/test")
+@router.post("/test", dependencies=[Depends(verify_admin)])
 async def test_ai_connection():
     cfg = load_ai_config()
     if not cfg.api_key.strip():
@@ -230,7 +230,7 @@ async def test_ai_connection():
             raise e
         raise HTTPException(status_code=500, detail=f"网络连接失败: {str(e)}")
 
-@router.post("/summarize")
+@router.post("/summarize", dependencies=[Depends(verify_admin)])
 async def summarize_doc(req: AiSummarizeRequest):
     cfg = load_ai_config()
     if not cfg.api_key.strip():
@@ -286,7 +286,7 @@ async def summarize_doc(req: AiSummarizeRequest):
             raise e
         raise HTTPException(status_code=500, detail=f"AI 总结生成失败: {str(e)}")
 
-@router.post("/chat")
+@router.post("/chat", dependencies=[Depends(verify_admin)])
 async def chat_with_ai(req: AiChatRequest):
     cfg = load_ai_config()
     if not cfg.api_key.strip():
@@ -576,8 +576,17 @@ async def execute_unified_scan(title: str, content: str, custom_prompt: Optional
         }
 
 @router.get("/summary/{title:path}")
-def get_summary(title: str):
+def get_summary(title: str, request: Request):
     """Get previously saved AI summary for a note from disk (0 API calls)."""
+    auth_header = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    is_admin = security.is_admin_token(auth_header)
+    if not is_admin:
+        perms = security.get_permissions()
+        if not perms.get("all_public", False):
+            public_list = perms.get("public_notes", [])
+            if title not in public_list:
+                raise HTTPException(status_code=403, detail="无权限查看此私密文档的 AI 摘要。")
+
     data = security.get_note_summary(title)
     return {
         "title": title,
@@ -587,12 +596,12 @@ def get_summary(title: str):
         "generatedAt": data.get("generatedAt", "")
     }
 
-@router.post("/scan")
+@router.post("/scan", dependencies=[Depends(verify_admin)])
 async def scan_doc(req: AiScanRequest):
     """Single-call background AI scan generating both structured summary and second-reader annotations."""
     return await execute_unified_scan(req.title, req.content, req.custom_prompt)
 
-@router.post("/review")
+@router.post("/review", dependencies=[Depends(verify_admin)])
 async def review_doc(req: AiReviewRequest):
     """Review doc endpoint (leverages unified single-call execution)."""
     res = await execute_unified_scan(req.title, req.content)
