@@ -25,9 +25,14 @@ if [ -n "$PID" ]; then
     sleep 1
 fi
 
+PYTHON_BIN="python3"
+if [ -x "${SCRIPT_DIR}/.venv/bin/python3" ]; then
+    PYTHON_BIN="${SCRIPT_DIR}/.venv/bin/python3"
+fi
+
 setsid -f env SIWAN_PATH="${SIWAN_PATH}" \
              SIWAN_AUTH_TYPE="${SIWAN_AUTH_TYPE}" \
-             python3 -m uvicorn main:app \
+             "${PYTHON_BIN}" -m uvicorn main:app \
              --app-dir server \
              --host "${SIWAN_HOST}" \
              --port "${SIWAN_PORT}" \
