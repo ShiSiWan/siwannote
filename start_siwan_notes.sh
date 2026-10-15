@@ -26,7 +26,7 @@ if [ -n "$PID" ]; then
 fi
 
 PYTHON_BIN="python3"
-if [ -x "${SCRIPT_DIR}/.venv/bin/python3" ]; then
+if [ -x "${SCRIPT_DIR}/.venv/bin/python3" ] && "${SCRIPT_DIR}/.venv/bin/python3" -c "import uvicorn" >/dev/null 2>&1; then
     PYTHON_BIN="${SCRIPT_DIR}/.venv/bin/python3"
 fi
 
